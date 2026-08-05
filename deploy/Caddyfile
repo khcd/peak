@@ -1,0 +1,4 @@
+{$TELEMETRY_DOMAIN} {
+    encode zstd gzip
+    reverse_proxy handler:8081
+}

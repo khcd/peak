@@ -1,0 +1,59 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.6-alpine
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: telemetry
+      CLICKHOUSE_USER: telemetry_ingest
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./deploy/clickhouse/init/01-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    networks: [internal]
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+  handler:
+    build: .
+    restart: unless-stopped
+    environment:
+      BIND_ADDR: 0.0.0.0:8081
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_DATABASE: telemetry
+      CLICKHOUSE_USER: telemetry_ingest
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
+      INGEST_KEY: ${INGEST_KEY:?set INGEST_KEY in .env}
+      INGEST_VERSION: ${INGEST_VERSION:-0.1.0}
+      TRUST_CLOUDFLARE_HEADERS: ${TRUST_CLOUDFLARE_HEADERS:-false}
+      RUST_LOG: info
+    depends_on:
+      - clickhouse
+    networks: [internal, edge]
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    environment:
+      TELEMETRY_DOMAIN: ${TELEMETRY_DOMAIN:?set TELEMETRY_DOMAIN in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - handler
+    networks: [edge]
+
+volumes:
+  clickhouse-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  internal:
+    internal: true
+  edge:

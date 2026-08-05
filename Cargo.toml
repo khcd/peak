@@ -1,0 +1,22 @@
+[package]
+name = "planar-telemetry-ingest"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Authenticated telemetry ingestion for Planar backed by ClickHouse"
+
+[dependencies]
+axum = "0.8"
+clickhouse = { version = "0.13", features = ["time", "uuid"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+subtle = "2"
+time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tower-http = { version = "0.6", features = ["limit", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["serde"] }
+
+[dev-dependencies]
+pretty_assertions = "1"

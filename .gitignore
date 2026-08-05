@@ -1,0 +1,20 @@
+/target
+.env
+
+# Rust build artifacts
+**/target/
+
+# Local environment and secrets
+.env.*
+!.env.example
+
+# Editor and operating-system files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs and local coverage output
+*.log
+coverage/

@@ -1,6 +1,8 @@
 mod auth;
+mod cli;
 mod config;
 mod contract;
+mod dashboard;
 mod error;
 mod event;
 
@@ -56,6 +58,16 @@ struct HealthRow {
 
 #[tokio::main]
 async fn main() {
+    match cli::Mode::from_args().unwrap_or_else(|message| {
+        eprintln!("{message}");
+        std::process::exit(2);
+    }) {
+        cli::Mode::Serve => serve().await,
+        cli::Mode::Dashboard { producer } => dashboard::run(producer).await,
+    }
+}
+
+async fn serve() {
     init_logging();
     let config = Config::from_env().unwrap_or_else(|message| {
         error!(%message, "invalid configuration");
@@ -66,7 +78,7 @@ async fn main() {
         std::process::exit(2);
     });
     let state = AppState {
-        clickhouse: clickhouse_client(&config),
+        clickhouse: config.clickhouse.client(),
         producers: Arc::new(producers),
         limits: Arc::new(config.limits),
         max_batch_events: config.max_batch_events,
@@ -80,7 +92,7 @@ async fn main() {
             error!(%error, address = %config.bind_addr, "failed to bind listener");
             std::process::exit(2);
         });
-    info!(address = %config.bind_addr, database = %config.clickhouse_database, max_batch_events = config.max_batch_events, trust_cloudflare_headers = config.trust_cloudflare_headers, "telemetry ingest service listening");
+    info!(address = %config.bind_addr, database = %config.clickhouse.database, max_batch_events = config.max_batch_events, trust_cloudflare_headers = config.trust_cloudflare_headers, "telemetry ingest service listening");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
@@ -206,22 +218,6 @@ fn country_from_headers(headers: &HeaderMap, state: &AppState) -> String {
         country.to_ascii_uppercase()
     } else {
         String::new()
-    }
-}
-
-fn clickhouse_client(config: &Config) -> Client {
-    let client = Client::default()
-        // ClickHouse async inserts buffer the raw HTTP body. Native LZ4 framing can then be
-        // parsed as RowBinary when the buffered insert is flushed, corrupting the row stream.
-        .with_compression(clickhouse::Compression::None)
-        .with_url(&config.clickhouse_url)
-        .with_database(&config.clickhouse_database)
-        .with_user(&config.clickhouse_user)
-        .with_option("async_insert", "1")
-        .with_option("wait_for_async_insert", "1");
-    match &config.clickhouse_password {
-        Some(password) => client.with_password(password),
-        None => client,
     }
 }
 

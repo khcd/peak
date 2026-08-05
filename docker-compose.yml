@@ -3,8 +3,8 @@ services:
     image: clickhouse/clickhouse-server:26.6-alpine
     restart: unless-stopped
     environment:
-      CLICKHOUSE_DB: telemetry
-      CLICKHOUSE_USER: telemetry_ingest
+      CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-telemetry}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-planar}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
     volumes:
       - clickhouse-data:/var/lib/clickhouse
@@ -21,8 +21,8 @@ services:
     environment:
       BIND_ADDR: 0.0.0.0:8081
       CLICKHOUSE_URL: http://clickhouse:8123
-      CLICKHOUSE_DATABASE: telemetry
-      CLICKHOUSE_USER: telemetry_ingest
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-telemetry}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-planar}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
       INGEST_KEYS: ${INGEST_KEYS:?set INGEST_KEYS in .env}
       INGEST_VERSION: ${INGEST_VERSION:-0.1.0}

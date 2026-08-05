@@ -22,5 +22,9 @@ CREATE TABLE IF NOT EXISTS telemetry.events
 ENGINE = ReplacingMergeTree(received_at)
 PARTITION BY toYYYYMM(occurred_at)
 ORDER BY (producer, event_name, occurred_at, event_id)
-TTL toDateTime(occurred_at) + INTERVAL 180 DAY
+-- live_ping is a liveness heartbeat, not analytics: one row per online install every five
+-- minutes, which makes it by far the highest-volume event in the table and worthless once the
+-- dashboard's connected-clients window has passed. Expire it early; everything else keeps 180 days.
+TTL toDateTime(occurred_at) + INTERVAL 2 DAY DELETE WHERE event_name = 'live_ping',
+    toDateTime(occurred_at) + INTERVAL 180 DAY
 SETTINGS index_granularity = 8192;

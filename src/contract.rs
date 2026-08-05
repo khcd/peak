@@ -143,6 +143,12 @@ pub static CONTRACTS: &[EventContract] = &[
     },
     EventContract {
         producer: "planar",
+        event_name: "live_ping",
+        schema_version: 1,
+        fields: &[],
+    },
+    EventContract {
+        producer: "planar",
         event_name: "feature_used",
         schema_version: 1,
         fields: FEATURE_USED,
@@ -233,5 +239,11 @@ mod tests {
                 contract.schema_version
             )));
         }
+    }
+
+    #[test]
+    fn live_ping_has_no_attributes() {
+        let contract = lookup("planar", "live_ping", 1).expect("live_ping contract should exist");
+        assert!(contract.fields.is_empty());
     }
 }

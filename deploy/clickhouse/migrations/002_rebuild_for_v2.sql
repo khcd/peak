@@ -1,6 +1,8 @@
-CREATE DATABASE IF NOT EXISTS telemetry;
+-- Destructive by design: telemetry data is local and disposable. The v2 ORDER BY
+-- begins with producer, which cannot be changed in place for ReplacingMergeTree.
+DROP TABLE IF EXISTS telemetry.events;
 
-CREATE TABLE IF NOT EXISTS telemetry.events
+CREATE TABLE telemetry.events
 (
     event_id         UUID,
     producer         LowCardinality(String),

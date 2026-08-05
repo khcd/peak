@@ -24,5 +24,6 @@ CREATE TABLE telemetry.events
 ENGINE = ReplacingMergeTree(received_at)
 PARTITION BY toYYYYMM(occurred_at)
 ORDER BY (producer, event_name, occurred_at, event_id)
-TTL toDateTime(occurred_at) + INTERVAL 180 DAY
+TTL toDateTime(occurred_at) + INTERVAL 2 DAY DELETE WHERE event_name = 'live_ping',
+    toDateTime(occurred_at) + INTERVAL 180 DAY
 SETTINGS index_granularity = 8192;

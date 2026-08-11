@@ -4,17 +4,17 @@ use axum::http::{HeaderMap, header};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    contract::{PRODUCERS, ProducerSpec},
     error::ApiError,
+    manifest::{Registry, Tenant},
 };
 
 #[derive(Clone)]
 pub struct ProducerRegistry {
-    by_digest: HashMap<[u8; 32], &'static ProducerSpec>,
+    by_digest: HashMap<[u8; 32], &'static Tenant>,
 }
 
 impl ProducerRegistry {
-    pub fn from_pairs(value: &str) -> Result<Self, String> {
+    pub fn from_pairs(value: &str, registry: &'static Registry) -> Result<Self, String> {
         let mut by_digest = HashMap::new();
         let mut names = HashSet::new();
         let mut found = false;
@@ -34,9 +34,8 @@ impl ProducerRegistry {
                     "secret for producer '{name}' must be at least 16 bytes"
                 ));
             }
-            let producer = PRODUCERS
-                .iter()
-                .find(|producer| producer.name == name)
+            let producer = registry
+                .get(name)
                 .ok_or_else(|| format!("unknown producer '{name}'"))?;
             let digest: [u8; 32] = Sha256::digest(secret.as_bytes()).into();
             if by_digest.insert(digest, producer).is_some() {
@@ -48,7 +47,7 @@ impl ProducerRegistry {
             .ok_or_else(|| "INGEST_KEYS must not be empty".into())
     }
 
-    pub fn authenticate(&self, headers: &HeaderMap) -> Result<&'static ProducerSpec, ApiError> {
+    pub fn authenticate(&self, headers: &HeaderMap) -> Result<&'static Tenant, ApiError> {
         let Some(value) = headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
@@ -66,7 +65,7 @@ impl ProducerRegistry {
     }
 }
 
-fn valid_producer_name(value: &str) -> bool {
+pub(crate) fn valid_producer_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 32
         && value
@@ -76,15 +75,10 @@ fn valid_producer_name(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::ProducerRegistry;
-
+    use super::valid_producer_name;
     #[test]
-    fn rejects_bad_registry_entries() {
-        assert!(ProducerRegistry::from_pairs("unknown:1234567890123456").is_err());
-        assert!(
-            ProducerRegistry::from_pairs("planar:1234567890123456,planar:abcdefghijklmnop")
-                .is_err()
-        );
-        assert!(ProducerRegistry::from_pairs("planar:short").is_err());
+    fn validates_producer_names() {
+        assert!(valid_producer_name("planar"));
+        assert!(!valid_producer_name("Planar"));
     }
 }

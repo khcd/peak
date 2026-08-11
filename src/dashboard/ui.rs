@@ -9,7 +9,6 @@ use ratatui::{
 use time::OffsetDateTime;
 
 use super::app::App;
-use super::query;
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -44,9 +43,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_fleet(frame, lower[1], app);
     draw_tail(frame, sections[3], app);
     let footer = match app.error_message() {
-        Some(message) => format!("error: {message} · 1/2/3 window · p pause · r refresh · q quit"),
-        None if app.paused => "paused · 1/2/3 window · p resume · r refresh · q quit".into(),
-        None => "1/2/3 window · p pause · r refresh · q quit".into(),
+        Some(message) => {
+            format!("error: {message} · 1/2/3 window · t tenant · p pause · r refresh · q quit")
+        }
+        None if app.paused => {
+            "paused · 1/2/3 window · t tenant · p resume · r refresh · q quit".into()
+        }
+        None => "1/2/3 window · t tenant · p pause · r refresh · q quit".into(),
     };
     Paragraph::new(footer).render(sections[4], frame.buffer_mut());
 }
@@ -77,10 +80,11 @@ fn draw_stats(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         number(app.totals.events_30d)
     );
     let installs = format!(
-        "INSTALLS\n today {:>14}\n 7d    {:>14}\n 30d   {:>14}",
-        number(app.totals.installs_today),
-        number(app.totals.installs_7d),
-        number(app.totals.installs_30d)
+        "{}\n today {:>14}\n 7d    {:>14}\n 30d   {:>14}",
+        app.tenant.dashboard.subject_label,
+        number(app.totals.subjects_today),
+        number(app.totals.subjects_7d),
+        number(app.totals.subjects_30d)
     );
     Paragraph::new(events)
         .block(
@@ -88,8 +92,8 @@ fn draw_stats(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
                 .borders(Borders::LEFT | Borders::TOP | Borders::BOTTOM)
                 .title(format!(
                     "{} · telemetry · window {} ({}) · {status}",
-                    app.producer,
-                    app.window.label(),
+                    app.tenant.dashboard.title,
+                    app.window.label(app.tenant),
                     app.timezone
                 )),
         )
@@ -99,8 +103,12 @@ fn draw_stats(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         .render(columns[1], frame.buffer_mut());
     let connected = format!(
         "CONNECTED\n now   {:>8}\n\n ping <{}m",
-        number(app.connected),
-        query::OFFLINE_AFTER_MINUTES
+        app.connected.map(number).unwrap_or_else(|| "--".into()),
+        app.tenant
+            .dashboard
+            .offline_after_minutes()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "--".into())
     );
     Paragraph::new(connected)
         .block(Block::default().borders(Borders::RIGHT | Borders::TOP | Borders::BOTTOM))
@@ -127,7 +135,7 @@ fn draw_events(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title(format!("events · {}", app.window.label())),
+            .title(format!("events · {}", app.window.label(app.tenant))),
     )
     .render(area, frame.buffer_mut());
 }
@@ -151,7 +159,7 @@ fn draw_fleet(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!("fleet · {}", app.window.label())),
+                .title(format!("fleet · {}", app.window.label(app.tenant))),
         )
         .render(area, frame.buffer_mut());
 }

@@ -18,6 +18,10 @@ services:
   handler:
     build: .
     restart: unless-stopped
+    ports:
+      # Local desktop development: Planar posts directly to the ingest handler.
+      # Keep ClickHouse on the internal Docker network.
+      - "127.0.0.1:8081:8081"
     environment:
       BIND_ADDR: 0.0.0.0:8081
       CLICKHOUSE_URL: http://clickhouse:8123
@@ -26,11 +30,15 @@ services:
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
       INGEST_KEYS: ${INGEST_KEYS:?set INGEST_KEYS in .env}
       INGEST_VERSION: ${INGEST_VERSION:-0.1.0}
+      MANIFEST_DIR: /app/tenants
+      DASHBOARD_TIMEZONE: ${DASHBOARD_TIMEZONE:-UTC}
       TRUST_CLOUDFLARE_HEADERS: ${TRUST_CLOUDFLARE_HEADERS:-false}
       RUST_LOG: info
     depends_on:
       - clickhouse
     networks: [internal, edge]
+    volumes:
+      - ./tenants:/app/tenants:ro
 
   caddy:
     image: caddy:2.10-alpine

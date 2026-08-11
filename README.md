@@ -28,6 +28,17 @@ Stores authenticated, versioned telemetry events in ClickHouse.
 
 The producer is derived from `Authorization: Bearer <secret>`. The service accepts only reviewed `(producer, event_name, schema_version)` contracts and flat, scalar `attributes`. It returns `200` with `{ "accepted": N, "rejected": [...] }`; accepted events are durable.
 
+## Tenants
+
+Tenant definitions are reviewed TOML manifests in [`tenants`](tenants). `_default.toml` supplies the
+shared contract and dashboard baseline; a tenant file replaces any event it defines and can disable
+an inherited event with `disabled = true`. Add a tenant by creating `tenants/<name>.toml`, adding a
+`<name>:<secret>` entry to `INGEST_KEYS`, and restarting the service. `MANIFEST_DIR` defaults to
+`tenants`.
+
+Optionally set `services = ["your-service"]` in a tenant manifest to restrict
+`resource.service_name`. The wire format and ClickHouse schema remain unchanged.
+
 ## Run locally
 
 Copy `.env.example` to `.env` and set `INGEST_KEYS` to a secret of at least 16 bytes. Load it into
@@ -68,11 +79,11 @@ See `.env.example` for configuration defaults.
 
 ## Terminal dashboard
 
-The same binary includes a read-only ClickHouse dashboard for a configured producer. It does not
+The same binary includes a read-only ClickHouse dashboard for a configured tenant. It does not
 need `INGEST_KEYS`, so it can run inside the production network without an ingest secret:
 
 ```sh
-docker compose exec -it handler planar-telemetry-ingest dashboard planar
+docker compose exec -it handler planar-telemetry-ingest dashboard
 ```
 
 Or, when running locally, with `.env` loaded as above:
@@ -93,13 +104,13 @@ whether the dashboard runs on a laptop in Sydney or via `docker compose exec` in
 container. The active timezone is shown in the header. The live chart is unaffected — it is a
 rolling 60 seconds of wall time.
 
-Press `1`, `2`, or `3` for today, 7 days, or 30 days; `p` pauses
-polling, `r` refreshes, and `q` (or Escape) exits. If ClickHouse is temporarily unavailable, the
+Press `1`, `2`, or `3` for the manifest's three configured windows; `t` switches to the next
+tenant and `Shift+T` to the previous one. `p` pauses polling, `r` refreshes, and `q` (or Escape)
+exits. If ClickHouse is temporarily unavailable, the
 last successful snapshot stays on screen and polling resumes automatically when it recovers.
 
-The `CONNECTED` panel counts distinct installs that emitted a `live_ping` in the last 11 minutes.
-The planar client pings every 5 minutes, so the threshold deliberately clears two intervals — at
-exactly 5 minutes a healthy client would sit on the boundary and flicker in and out of the count.
+The `CONNECTED` panel follows each manifest's optional liveness event. Its offline threshold is
+twice the declared ping interval plus one minute; tenants without liveness show `--`.
 Liveness is measured on `received_at`, so an install whose wall clock is wrong is still counted
 correctly. A sleeping or suspended device stops pinging and drops out of the count, as intended.
 

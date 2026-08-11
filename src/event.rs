@@ -6,8 +6,9 @@ use uuid::Uuid;
 
 use crate::{
     config::Limits,
-    contract::{IdShape, ProducerSpec, lookup, validate_attributes},
+    contract::{IdShape, validate_attributes},
     error::EventError,
+    manifest::Tenant,
 };
 
 #[derive(Debug, Deserialize)]
@@ -63,7 +64,7 @@ pub struct EventRow {
 impl IncomingEvent {
     pub fn validate(
         self,
-        producer: &ProducerSpec,
+        producer: &'static Tenant,
         limits: &Limits,
         country: &str,
         ingest_version: &str,
@@ -110,6 +111,15 @@ impl IncomingEvent {
             _ => {}
         }
         validate_string("service_name", &self.resource.service_name, 64, true)?;
+        if let Some(services) = &producer.services
+            && !services
+                .iter()
+                .any(|service| service == &self.resource.service_name)
+        {
+            return Err(EventError::invalid_envelope(
+                "resource.service_name is not allowed for this tenant",
+            ));
+        }
         validate_string("service_version", &self.resource.service_version, 64, true)?;
         let platform = self.resource.platform.unwrap_or_default();
         let platform_version = self.resource.platform_version.unwrap_or_default();
@@ -121,8 +131,9 @@ impl IncomingEvent {
                 "session_id must be at most 128 bytes",
             ));
         }
-        let contract =
-            lookup(producer.name, &self.event_name, self.schema_version).ok_or_else(|| {
+        let contract = producer
+            .contract(&self.event_name, self.schema_version)
+            .ok_or_else(|| {
                 EventError::unknown_contract(format!(
                     "no contract for producer '{}', event '{}', schema version {}",
                     producer.name, self.event_name, self.schema_version
@@ -140,7 +151,7 @@ impl IncomingEvent {
         }
         Ok(EventRow {
             event_id: self.event_id,
-            producer: producer.name.into(),
+            producer: producer.name.clone(),
             event_name: self.event_name,
             schema_version: self.schema_version,
             occurred_at,

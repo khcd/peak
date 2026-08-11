@@ -1,0 +1,23 @@
+name = "planar"
+
+[dashboard]
+title = "planar"
+
+[events.generation_requested.fields]
+backend = { type = "enum", values = ["sdcpp", "diffusers"], required = true }
+model = { type = "str", max_bytes = 256, required = true }
+steps = { type = "u64", required = true }
+width = { type = "u64", required = true }
+height = { type = "u64", required = true }
+sampler = { type = "str", max_bytes = 128, required = true }
+
+[events.generation_completed.fields]
+duration_ms = { type = "u64", required = true }
+success = { type = "bool", required = true }
+error_kind = { type = "enum", values = ["oom", "model_load", "other"], nullable = true }
+backend = { type = "enum", values = ["sdcpp", "diffusers"] }
+
+[events.model_loaded.fields]
+model = { type = "str", max_bytes = 256, required = true }
+load_ms = { type = "u64", required = true }
+size_mb = { type = "u64", required = true }

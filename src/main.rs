@@ -5,6 +5,7 @@ mod contract;
 mod dashboard;
 mod error;
 mod event;
+mod manifest;
 
 use std::{
     sync::Arc,
@@ -33,7 +34,7 @@ use crate::{
     event::{EventRow, IncomingEvent},
 };
 
-const INSERT_TABLE: &str = "telemetry.events";
+const INSERT_TABLE: &str = "events";
 
 #[derive(Clone)]
 struct AppState {
@@ -58,25 +59,34 @@ struct HealthRow {
 
 #[tokio::main]
 async fn main() {
-    match cli::Mode::from_args().unwrap_or_else(|message| {
+    let registry = Box::leak(Box::new(
+        manifest::Registry::load(std::path::Path::new(&config::manifest_dir())).unwrap_or_else(
+            |message| {
+                eprintln!("invalid tenant manifests: {message}");
+                std::process::exit(2);
+            },
+        ),
+    ));
+    match cli::Mode::from_args(registry).unwrap_or_else(|message| {
         eprintln!("{message}");
         std::process::exit(2);
     }) {
-        cli::Mode::Serve => serve().await,
-        cli::Mode::Dashboard { producer } => dashboard::run(producer).await,
+        cli::Mode::Serve => serve(registry).await,
+        cli::Mode::Dashboard { tenant } => dashboard::run(registry, tenant).await,
     }
 }
 
-async fn serve() {
+async fn serve(registry: &'static manifest::Registry) {
     init_logging();
     let config = Config::from_env().unwrap_or_else(|message| {
         error!(%message, "invalid configuration");
         std::process::exit(2);
     });
-    let producers = ProducerRegistry::from_pairs(&config.ingest_keys).unwrap_or_else(|message| {
-        error!(%message, "invalid ingest-key registry");
-        std::process::exit(2);
-    });
+    let producers =
+        ProducerRegistry::from_pairs(&config.ingest_keys, registry).unwrap_or_else(|message| {
+            error!(%message, "invalid ingest-key registry");
+            std::process::exit(2);
+        });
     let state = AppState {
         clickhouse: config.clickhouse.client(),
         producers: Arc::new(producers),
@@ -255,6 +265,7 @@ mod tests {
     use crate::{
         auth::ProducerRegistry,
         event::{IncomingResource, IncomingSubject},
+        manifest::{Registry, Tenant},
     };
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
     use uuid::Uuid;
@@ -262,7 +273,9 @@ mod tests {
     fn state() -> AppState {
         AppState {
             clickhouse: Client::default(),
-            producers: Arc::new(ProducerRegistry::from_pairs("planar:this-is-a-test-key").unwrap()),
+            producers: Arc::new(
+                ProducerRegistry::from_pairs("planar:this-is-a-test-key", registry()).unwrap(),
+            ),
             limits: Arc::new(Limits {
                 max_attributes_bytes: 100,
                 max_event_age_days: 190,
@@ -293,8 +306,13 @@ mod tests {
             attributes: serde_json::json!({}),
         }
     }
-    fn producer() -> &'static crate::contract::ProducerSpec {
-        crate::contract::PRODUCERS.first().unwrap()
+    fn registry() -> &'static Registry {
+        Box::leak(Box::new(
+            Registry::load(std::path::Path::new("tenants")).unwrap(),
+        ))
+    }
+    fn producer() -> &'static Tenant {
+        registry().get("planar").unwrap()
     }
     #[test]
     fn valid_event_round_trips_to_row() {

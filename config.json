@@ -1,0 +1,5 @@
+{
+  "clickhouse": {
+    "transport_compression": "lz4"
+  }
+}

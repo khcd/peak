@@ -41,6 +41,16 @@ set -a && . ./.env && set +a
 `default`, but the ClickHouse image disables the `default` account as soon as `CLICKHOUSE_USER` is
 set on the container, so that fallback can never authenticate — it fails with `Code: 194`.
 
+## Service settings
+
+Non-secret, versioned settings live in [`config.json`](config.json). `CONFIG_PATH` can point to a
+different file; it defaults to `config.json`. The supplied Docker image includes this file at
+`/app/config.json`.
+
+`clickhouse.transport_compression` controls the ClickHouse client connection: `lz4` uses native LZ4
+transport blocks (the default), while `none` disables them. This affects only traffic between the
+service and ClickHouse; MergeTree storage compression is configured independently by ClickHouse.
+
 Recreate the disposable local table:
 
 ```sh

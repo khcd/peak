@@ -18,7 +18,13 @@ struct HealthRow {
 }
 
 pub async fn run(producer: &'static ProducerSpec) {
-    let config = ClickhouseConfig::from_env();
+    let config = match ClickhouseConfig::from_env() {
+        Ok(config) => config,
+        Err(message) => {
+            eprintln!("invalid configuration: {message}");
+            return;
+        }
+    };
     let timezone = crate::config::dashboard_timezone();
     // Every calendar-day boundary below resolves in this timezone. An unknown name makes
     // ClickHouse reject the query outright, so the health check doubles as its validation.

@@ -1,4 +1,4 @@
-# Planar telemetry ingest
+# Telemetry ingest
 
 Stores authenticated, versioned telemetry events in ClickHouse.
 
@@ -16,7 +16,7 @@ Stores authenticated, versioned telemetry events in ClickHouse.
     "subject": { "kind": "install", "id": "1dd9d9c1-0bb4-4b21-b665-7f79d9f3e256" },
     "session_id": "679590a4-eea6-4e91-aeb0-23c8aa90ccaa",
     "resource": {
-      "service_name": "planar",
+      "service_name": "example-client",
       "service_version": "0.1.0",
       "platform": "macOS",
       "platform_version": "15.0"
@@ -72,6 +72,46 @@ set -a && . ./.env && set +a
 `default`, but the ClickHouse image disables the `default` account as soon as `CLICKHOUSE_USER` is
 set on the container, so that fallback can never authenticate — it fails with `Code: 194`.
 
+## Run with Docker
+
+Docker Compose starts ClickHouse and the telemetry handler together. Copy the example environment
+file, set a real ingest secret, and provide a domain for the optional Caddy reverse proxy:
+
+```sh
+cp .env.example .env
+openssl rand -hex 24
+# Put the generated value into INGEST_KEYS, for example:
+# INGEST_KEYS=tenant-name:<generated-value>
+# For a local-only run, set TELEMETRY_DOMAIN=localhost.
+# For a public deployment, set it to the DNS name pointing at this host.
+```
+
+Start the complete stack, including Caddy on ports 80 and 443:
+
+```sh
+docker compose up -d --build
+```
+
+For local development, the handler is also exposed directly at
+`http://127.0.0.1:8081`; Caddy is not required for local clients. The `handler` service still
+needs `TELEMETRY_DOMAIN` in `.env` because Compose validates the full file, even when only these
+services are selected:
+
+```sh
+docker compose up -d --build clickhouse handler
+curl http://127.0.0.1:8081/healthz
+```
+
+Follow service logs or stop the stack with:
+
+```sh
+docker compose logs -f handler
+docker compose down
+```
+
+ClickHouse data is kept in the `clickhouse-data` Docker volume. The initial schema is applied only
+when that volume is first created.
+
 ## Service settings
 
 Non-secret, versioned settings live in [`config.json`](config.json). `CONFIG_PATH` can point to a
@@ -103,14 +143,26 @@ The same binary includes a read-only ClickHouse dashboard for a configured tenan
 need `INGEST_KEYS`, so it can run inside the production network without an ingest secret:
 
 ```sh
-docker compose exec -it handler planar-telemetry-ingest dashboard
+docker compose exec -it handler telemetry-ingest dashboard tenant-name
 ```
+
+The Docker dashboard command uses the handler container's network and configuration, so it connects
+to ClickHouse at the internal Compose address. Start the stack first, then replace `tenant-name`
+with any tenant name declared in `tenants/<name>.toml`:
+
+```sh
+docker compose up -d --build clickhouse handler
+docker compose exec -it handler telemetry-ingest dashboard tenant-name
+```
+
+Press `q` or Escape to leave the dashboard. The dashboard process exits without stopping the
+background handler or ClickHouse containers.
 
 Or, when running locally, with `.env` loaded as above:
 
 ```sh
 set -a && . ./.env && set +a
-cargo run -- dashboard planar
+cargo run -- dashboard tenant-name
 ```
 
 The dashboard uses `received_at` for its live incoming-events chart and `occurred_at` for the

@@ -1,6 +1,6 @@
-# planar-telemetry-ingest
+# telemetry-ingest
 
-Authenticated, versioned telemetry ingest for Planar. Single Rust binary with two modes:
+Authenticated, versioned multi-tenant telemetry ingest. Single Rust binary with two modes:
 an axum HTTP ingest server (`serve`) and a read-only ratatui TUI dashboard (`dashboard <tenant>`),
 dispatched in `src/main.rs:72`.
 

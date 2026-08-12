@@ -207,7 +207,7 @@ Three layers:
    all, so this is new infrastructure. Keep the existing `manifest-compat` job untouched.
 
 Manual end-to-end check per backend: `docker compose up`, `POST /v2/events` with the README's sample
-batch, confirm `200 {"accepted":1}`, then `cargo run -- dashboard planar` and confirm the tail and
+batch, confirm `200 {"accepted":1}`, then `cargo run -- dashboard tenant-name` and confirm the tail and
 counters populate.
 
 ## Where the estimate breaks

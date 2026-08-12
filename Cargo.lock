@@ -1439,31 +1439,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
-name = "planar-telemetry-ingest"
-version = "0.1.0"
-dependencies = [
- "axum",
- "clickhouse",
- "crossterm",
- "flate2",
- "futures-util",
- "pretty_assertions",
- "ratatui",
- "serde",
- "serde_json",
- "sha2",
- "time",
- "tokio",
- "toml",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "zstd",
-]
-
-[[package]]
 name = "portable-atomic"
 version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2005,6 +1980,31 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "telemetry-ingest"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clickhouse",
+ "crossterm",
+ "flate2",
+ "futures-util",
+ "pretty_assertions",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "sha2",
+ "time",
+ "tokio",
+ "toml",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zstd",
 ]
 
 [[package]]

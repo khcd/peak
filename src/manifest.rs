@@ -491,7 +491,7 @@ mod tests {
     fn checked_in_manifests_pass_compatibility() {
         let registry = Registry::load(Path::new("tenants")).unwrap();
         registry.check_compatibility().unwrap();
-        let planar = registry.get("planar").unwrap();
+        let tenant = registry.first().unwrap();
         assert!(registry.get("_example").is_none());
         let example = fs::read_to_string("tenants/_example.toml").unwrap();
         let example: Manifest = toml::from_str(&example).unwrap();
@@ -501,10 +501,10 @@ mod tests {
             Path::new("tenants/_example.toml"),
         )
         .unwrap();
-        assert_eq!(planar.subject_kinds[0].kind, "install");
-        assert!(planar.contract("generation_requested", 1).is_some());
-        assert_eq!(planar.dashboard.offline_after_minutes(), Some(11));
-        let mut contracts = planar
+        assert_eq!(tenant.subject_kinds[0].kind, "install");
+        assert!(tenant.contract("generation_requested", 1).is_some());
+        assert_eq!(tenant.dashboard.offline_after_minutes(), Some(11));
+        let mut contracts = tenant
             .contracts
             .values()
             .map(|contract| (contract.event_name.as_str(), contract.schema_version))
@@ -523,7 +523,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            planar
+            tenant
                 .contract("generation_requested", 1)
                 .unwrap()
                 .fields

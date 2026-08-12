@@ -286,10 +286,15 @@ mod tests {
     use uuid::Uuid;
 
     fn state() -> AppState {
+        let tenant_name = registry().first().unwrap().name.clone();
         AppState {
             clickhouse: Client::default(),
             producers: Arc::new(
-                ProducerRegistry::from_pairs("planar:this-is-a-test-key", registry()).unwrap(),
+                ProducerRegistry::from_pairs(
+                    &format!("{tenant_name}:this-is-a-test-key"),
+                    registry(),
+                )
+                .unwrap(),
             ),
             limits: Arc::new(Limits {
                 max_attributes_bytes: 100,
@@ -313,7 +318,7 @@ mod tests {
             },
             session_id: Some("session".into()),
             resource: IncomingResource {
-                service_name: "planar".into(),
+                service_name: "test-service".into(),
                 service_version: "0.1.0".into(),
                 platform: Some("macOS".into()),
                 platform_version: Some("15.0".into()),
@@ -327,7 +332,7 @@ mod tests {
         ))
     }
     fn producer() -> &'static Tenant {
-        registry().get("planar").unwrap()
+        registry().first().unwrap()
     }
     #[test]
     fn valid_event_round_trips_to_row() {
@@ -403,7 +408,7 @@ mod tests {
     }
     #[test]
     fn rejects_unknown_envelope_fields() {
-        let json = serde_json::json!({ "event_id": Uuid::nil(), "event_name": "session_start", "schema_version": 1, "occurred_at": "2026-08-05T12:34:56Z", "occurredAt": "bad", "subject": { "kind": "install", "id": Uuid::nil() }, "resource": { "service_name": "planar", "service_version": "0.1.0" }, "attributes": {} });
+        let json = serde_json::json!({ "event_id": Uuid::nil(), "event_name": "session_start", "schema_version": 1, "occurred_at": "2026-08-05T12:34:56Z", "occurredAt": "bad", "subject": { "kind": "install", "id": Uuid::nil() }, "resource": { "service_name": "test-service", "service_version": "0.1.0" }, "attributes": {} });
         assert!(serde_json::from_value::<IncomingEvent>(json).is_err());
     }
     #[tokio::test]

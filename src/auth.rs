@@ -78,7 +78,7 @@ mod tests {
     use super::valid_producer_name;
     #[test]
     fn validates_producer_names() {
-        assert!(valid_producer_name("planar"));
-        assert!(!valid_producer_name("Planar"));
+        assert!(valid_producer_name("producer"));
+        assert!(!valid_producer_name("Producer"));
     }
 }

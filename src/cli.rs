@@ -43,7 +43,7 @@ fn parse(
 }
 
 fn usage() -> String {
-    "usage: planar-telemetry-ingest [dashboard [tenant]]".into()
+    "usage: telemetry-ingest [dashboard [tenant]]".into()
 }
 
 #[cfg(test)]
@@ -62,15 +62,16 @@ mod tests {
 
     #[test]
     fn dashboard_resolves_producer() {
-        let mode = parse(["dashboard".into(), "planar".into()], registry()).unwrap();
-        assert!(matches!(mode, Mode::Dashboard { tenant } if tenant.name == "planar"));
+        let tenant_name = registry().first().unwrap().name.clone();
+        let mode = parse(["dashboard".into(), tenant_name.clone()], registry()).unwrap();
+        assert!(matches!(mode, Mode::Dashboard { tenant } if tenant.name == tenant_name));
     }
 
     #[test]
     fn invalid_producer_lists_choices() {
         let error = parse(["dashboard".into(), "nope".into()], registry()).unwrap_err();
         assert!(error.contains("nope"));
-        assert!(error.contains("planar"));
+        assert!(error.contains(&registry().first().unwrap().name));
     }
 
     #[test]
@@ -79,9 +80,10 @@ mod tests {
             parse(["dashboard".into()], registry()),
             Ok(Mode::Dashboard { .. })
         ));
+        let tenant_name = registry().first().unwrap().name.clone();
         assert!(
             parse(
-                ["dashboard".into(), "planar".into(), "extra".into()],
+                ["dashboard".into(), tenant_name, "extra".into()],
                 registry()
             )
             .is_err()

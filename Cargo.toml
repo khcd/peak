@@ -1,9 +1,9 @@
 [package]
-name = "planar-telemetry-ingest"
+name = "telemetry-ingest"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "Authenticated telemetry ingestion for Planar backed by ClickHouse"
+description = "Authenticated multi-tenant telemetry ingestion backed by ClickHouse"
 
 [dependencies]
 axum = "0.8"

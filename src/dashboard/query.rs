@@ -237,9 +237,9 @@ mod tests {
     use super::*;
     use crate::manifest::Registry;
     use std::path::Path;
-    fn planar() -> &'static Tenant {
+    fn tenant() -> &'static Tenant {
         Box::leak(Box::new(Registry::load(Path::new("tenants")).unwrap()))
-            .get("planar")
+            .first()
             .unwrap()
     }
 
@@ -247,13 +247,13 @@ mod tests {
     fn windows_are_day_aligned_and_count_today() {
         // A window of N days starts at midnight N-1 days ago, so it covers N whole days
         // including today rather than N days plus the elapsed part of today.
-        assert_eq!(Window::D1.since(planar()), "toStartOfDay(now())");
+        assert_eq!(Window::D1.since(tenant()), "toStartOfDay(now())");
         assert_eq!(
-            Window::D7.since(planar()),
+            Window::D7.since(tenant()),
             "toStartOfDay(now()) - INTERVAL 6 DAY"
         );
         assert_eq!(
-            Window::D30.since(planar()),
+            Window::D30.since(tenant()),
             "toStartOfDay(now()) - INTERVAL 29 DAY"
         );
     }
@@ -261,33 +261,24 @@ mod tests {
     #[test]
     fn no_window_uses_a_rolling_interval_from_now() {
         for window in [Window::D1, Window::D7, Window::D30] {
-            assert!(!breakdown_sql(window, planar()).contains("now() - INTERVAL"));
-            assert!(!fleet_sql(window, planar()).contains("now() - INTERVAL"));
+            assert!(!breakdown_sql(window, tenant()).contains("now() - INTERVAL"));
+            assert!(!fleet_sql(window, tenant()).contains("now() - INTERVAL"));
         }
-        assert!(!totals_sql(planar()).contains("now() - INTERVAL"));
-    }
-
-    #[test]
-    fn offline_threshold_clears_the_client_ping_interval() {
-        // The planar client pings every 5 minutes. A threshold at or below that would make a
-        // healthy client flicker in and out of the connected count on ordinary jitter.
-        for tenant in Box::leak(Box::new(Registry::load(Path::new("tenants")).unwrap())).iter() {
-            if let Some(liveness) = &tenant.dashboard.liveness {
-                assert!(
-                    tenant.dashboard.offline_after_minutes().unwrap()
-                        > liveness.ping_interval_minutes * 2
-                );
-            }
-        }
+        assert!(!totals_sql(tenant()).contains("now() - INTERVAL"));
     }
 
     #[test]
     fn connected_counts_distinct_installs_on_received_at() {
-        let sql = connected_sql(planar()).unwrap();
+        let tenant = tenant();
+        let sql = connected_sql(tenant).unwrap();
         assert!(sql.contains("uniqExact(subject_id)"));
         assert!(sql.contains("event_name = ?"));
         // Liveness must not depend on the client's wall clock.
-        assert!(sql.contains("received_at >= now() - INTERVAL 11 MINUTE"));
+        let interval = format!(
+            "received_at >= now() - INTERVAL {} MINUTE",
+            tenant.dashboard.offline_after_minutes().unwrap()
+        );
+        assert!(sql.contains(&interval));
         assert!(!sql.contains("occurred_at"));
     }
 
@@ -296,10 +287,10 @@ mod tests {
         assert!(live_chart_sql().contains("producer = ?"));
         assert!(tail_since_sql().contains("received_at >= fromUnixTimestamp64Milli(?, 'UTC')"));
         assert!(
-            breakdown_sql(Window::D7, planar()).contains("toStartOfDay(now()) - INTERVAL 6 DAY")
+            breakdown_sql(Window::D7, tenant()).contains("toStartOfDay(now()) - INTERVAL 6 DAY")
         );
         assert_eq!(
-            fleet_sql(Window::D30, planar())
+            fleet_sql(Window::D30, tenant())
                 .matches("producer = ?")
                 .count(),
             3

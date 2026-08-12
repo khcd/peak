@@ -4,7 +4,11 @@ use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Row, Sparkline, Table, Widget},
+    symbols::Marker,
+    widgets::{
+        Axis, Block, Borders, Chart, Dataset, GraphType, List, ListItem, Paragraph, Row, Table,
+        Widget,
+    },
 };
 use time::OffsetDateTime;
 
@@ -24,16 +28,27 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .split(area);
     draw_stats(frame, sections[0], app);
     let peak = app.buckets.iter().copied().max().unwrap_or(0);
-    Sparkline::default()
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!("incoming · events/sec · last 60s · peak {peak}")),
-        )
-        .data(app.buckets)
-        .max(peak.max(1))
-        .style(Style::default().fg(Color::Cyan))
-        .render(sections[1], frame.buffer_mut());
+    let points = app
+        .buckets
+        .iter()
+        .enumerate()
+        .map(|(second, events)| (second as f64, *events as f64))
+        .collect::<Vec<_>>();
+    Chart::new(vec![
+        Dataset::default()
+            .data(&points)
+            .graph_type(GraphType::Line)
+            .marker(Marker::Braille)
+            .style(Style::default().fg(Color::Cyan)),
+    ])
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!("incoming · events/sec · last 60s · peak {peak}")),
+    )
+    .x_axis(Axis::default().bounds([0.0, 59.0]))
+    .y_axis(Axis::default().bounds([0.0, peak.max(1) as f64]))
+    .render(sections[1], frame.buffer_mut());
 
     let lower = Layout::default()
         .direction(Direction::Horizontal)

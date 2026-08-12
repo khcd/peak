@@ -50,4 +50,4 @@ model = { type = "model", required = true }
 # { "model": { "name": "sd15", "load_ms": 420, "size_mb": 2048 } }
 
 # Optionally restrict accepted resource.service_name values for this tenant.
-# services = ["planar"]
+# services = ["example-service"]

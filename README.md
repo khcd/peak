@@ -34,9 +34,11 @@ decoded request body sizes.
 
 ## Tenants
 
-Tenant definitions are self-contained, reviewed TOML manifests in [`tenants`](tenants). Add a tenant
-by creating `tenants/<name>.toml`, adding a `<name>:<secret>` entry to `INGEST_KEYS`, and restarting
-the service. `MANIFEST_DIR` defaults to `tenants`.
+Tenant definitions are self-contained, reviewed TOML manifests in [`tenants`](tenants). The
+[`_example.toml`](tenants/_example.toml) file documents the available manifest shapes and is
+ignored by the loader. Add a tenant by copying it to `tenants/<name>.toml`, adding a
+`<name>:<secret>` entry to `INGEST_KEYS`, and restarting the service. `MANIFEST_DIR` defaults to
+`tenants`.
 
 A manifest can define local reusable nested structs under `common_fields`. The type name is scoped to
 that manifest and can be used from an event field with `type = "<name>"`:

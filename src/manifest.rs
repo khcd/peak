@@ -40,6 +40,9 @@ impl Registry {
             let entry =
                 entry.map_err(|e| format!("could not read manifest directory entry: {e}"))?;
             let path = entry.path();
+            if path.file_name().is_some_and(|name| name == "_example.toml") {
+                continue;
+            }
             if path.extension().is_some_and(|x| x == "toml") {
                 let stem = path
                     .file_stem()
@@ -489,6 +492,15 @@ mod tests {
         let registry = Registry::load(Path::new("tenants")).unwrap();
         registry.check_compatibility().unwrap();
         let planar = registry.get("planar").unwrap();
+        assert!(registry.get("_example").is_none());
+        let example = fs::read_to_string("tenants/_example.toml").unwrap();
+        let example: Manifest = toml::from_str(&example).unwrap();
+        build_tenant(
+            "example".into(),
+            example,
+            Path::new("tenants/_example.toml"),
+        )
+        .unwrap();
         assert_eq!(planar.subject_kinds[0].kind, "install");
         assert!(planar.contract("generation_requested", 1).is_some());
         assert_eq!(planar.dashboard.offline_after_minutes(), Some(11));

@@ -1,0 +1,53 @@
+# Reference tenant manifest. This file is intentionally ignored by the loader.
+# Copy it to tenants/<name>.toml and adapt it for a real tenant.
+
+name = "example"
+
+# Every tenant manifest defines its own subject kinds.
+[[subject_kinds]]
+kind = "install"
+id_shape = "uuid"
+
+# Dashboard settings are required for every tenant.
+[dashboard]
+title = "Example tenant"
+subject_label = "INSTALLS"
+windows = [1, 7, 30]
+fleet_dimensions = ["platform", "version", "country", "service_name"]
+
+[dashboard.liveness]
+event_name = "live_ping"
+ping_interval_minutes = 5
+
+# An event with no fields accepts an empty attributes object.
+[events.session_start]
+[events.live_ping]
+
+# Scalar field types: bool, u64, i64, f64, str, and enum.
+[events.generation_requested.fields]
+backend = { type = "enum", values = ["sdcpp", "diffusers"], required = true }
+model = { type = "str", max_bytes = 256, required = true }
+steps = { type = "u64", required = true }
+guidance = { type = "f64" }
+success = { type = "bool" }
+
+# Nullable fields accept null; required fields must be present.
+[events.generation_completed.fields]
+duration_ms = { type = "u64", required = true }
+error_kind = { type = "enum", values = ["oom", "model_load", "other"], nullable = true }
+
+# A common_fields table defines a nested struct local to this manifest.
+# The struct can be used by event fields by referring to its name as the type.
+[events.model.common_fields]
+name = { type = "str", max_bytes = 256, required = true }
+load_ms = { type = "u64", required = true }
+size_mb = { type = "u64", required = true }
+
+[events.model_loaded.fields]
+model = { type = "model", required = true }
+
+# The resulting attributes for model_loaded look like:
+# { "model": { "name": "sd15", "load_ms": 420, "size_mb": 2048 } }
+
+# Optionally restrict accepted resource.service_name values for this tenant.
+# services = ["planar"]

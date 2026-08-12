@@ -502,7 +502,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(tenant.subject_kinds[0].kind, "install");
-        assert!(tenant.contract("generation_requested", 1).is_some());
+        assert!(tenant.contract("job_started", 1).is_some());
         assert_eq!(tenant.dashboard.offline_after_minutes(), Some(11));
         let mut contracts = tenant
             .contracts
@@ -514,22 +514,15 @@ mod tests {
             contracts,
             vec![
                 ("feature_used", 1),
-                ("generation_completed", 1),
-                ("generation_requested", 1),
+                ("job_finished", 1),
+                ("job_started", 1),
                 ("live_ping", 1),
                 ("model_loaded", 1),
                 ("session_end", 1),
                 ("session_start", 1),
             ]
         );
-        assert_eq!(
-            tenant
-                .contract("generation_requested", 1)
-                .unwrap()
-                .fields
-                .len(),
-            6
-        );
+        assert_eq!(tenant.contract("job_started", 1).unwrap().fields.len(), 6);
     }
 
     #[test]

@@ -73,12 +73,45 @@ pub(crate) fn valid_producer_name(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
+pub(crate) fn generate_secret() -> String {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).expect("operating system random number generator unavailable");
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::valid_producer_name;
+    use super::{ProducerRegistry, generate_secret, valid_producer_name};
+    use crate::manifest::Registry;
+    use axum::http::{HeaderMap, HeaderValue, header::AUTHORIZATION};
+    use std::path::Path;
     #[test]
     fn validates_producer_names() {
         assert!(valid_producer_name("producer"));
         assert!(!valid_producer_name("Producer"));
+    }
+
+    #[test]
+    fn generated_secrets_are_parser_safe_and_random() {
+        let first = generate_secret();
+        let second = generate_secret();
+        assert_eq!(first.len(), 64);
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(!first.contains(',') && !first.contains(':'));
+        assert!(first.len() >= 16);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn generated_secret_authenticates_for_the_right_tenant() {
+        let registry = Box::leak(Box::new(Registry::load(Path::new("tenants")).unwrap()));
+        let secret = generate_secret();
+        let producers = ProducerRegistry::from_pairs(&format!("demo:{secret}"), registry).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {secret}")).unwrap(),
+        );
+        assert_eq!(producers.authenticate(&headers).unwrap().name, "demo");
     }
 }

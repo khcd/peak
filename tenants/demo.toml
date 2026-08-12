@@ -1,11 +1,11 @@
-name = "planar"
+name = "demo"
 
 [[subject_kinds]]
 kind = "install"
 id_shape = "uuid"
 
 [dashboard]
-title = "planar"
+title = "Demo"
 subject_label = "INSTALLS"
 windows = [1, 7, 30]
 fleet_dimensions = ["platform", "version", "country"]
@@ -23,19 +23,19 @@ duration_ms = { type = "u64", required = true }
 [events.feature_used.fields]
 feature = { type = "str", max_bytes = 128, required = true }
 
-[events.generation_requested.fields]
-backend = { type = "enum", values = ["sdcpp", "diffusers"], required = true }
+[events.job_started.fields]
+engine = { type = "enum", values = ["local", "remote"], required = true }
 model = { type = "str", max_bytes = 256, required = true }
-steps = { type = "u64", required = true }
-width = { type = "u64", required = true }
-height = { type = "u64", required = true }
-sampler = { type = "str", max_bytes = 128, required = true }
+iterations = { type = "u64", required = true }
+output_width = { type = "u64", required = true }
+output_height = { type = "u64", required = true }
+scheduler = { type = "str", max_bytes = 128, required = true }
 
-[events.generation_completed.fields]
+[events.job_finished.fields]
 duration_ms = { type = "u64", required = true }
 success = { type = "bool", required = true }
 error_kind = { type = "enum", values = ["oom", "model_load", "other"], nullable = true }
-backend = { type = "enum", values = ["sdcpp", "diffusers"] }
+engine = { type = "enum", values = ["local", "remote"] }
 
 [events.model.common_fields]
 model = { type = "str", max_bytes = 256, required = true }

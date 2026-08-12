@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     fs,
     path::Path,
 };
@@ -33,13 +33,6 @@ pub struct Registry {
 
 impl Registry {
     pub fn load(dir: &Path) -> Result<Self, String> {
-        let default_path = dir.join("_default.toml");
-        if !default_path.is_file() {
-            return Err(format!(
-                "missing required manifest {}",
-                default_path.display()
-            ));
-        }
         let mut files = BTreeMap::new();
         for entry in fs::read_dir(dir)
             .map_err(|e| format!("could not read manifest directory {}: {e}", dir.display()))?
@@ -60,16 +53,9 @@ impl Registry {
                 files.insert(stem, (path, parsed));
             }
         }
-        let (_, default) = files
-            .get("_default")
-            .ok_or_else(|| format!("missing required manifest {}", default_path.display()))?;
         let mut tenants = BTreeMap::new();
-        for (stem, (path, _manifest)) in &files {
-            if stem == "_default" {
-                continue;
-            }
-            let merged = resolve(stem, &files, default, &mut HashSet::new())?;
-            let name = merged.name.clone().unwrap_or_else(|| stem.clone());
+        for (stem, (path, manifest)) in files {
+            let name = manifest.name.clone().unwrap_or(stem);
             if !valid_producer_name(&name) {
                 return Err(format!(
                     "invalid tenant name '{name}' in {}",
@@ -79,12 +65,14 @@ impl Registry {
             if tenants.contains_key(&name) {
                 return Err(format!("duplicate tenant name '{name}'"));
             }
-            tenants.insert(name.clone(), build_tenant(name, merged, path)?);
+            tenants.insert(name.clone(), build_tenant(name, manifest, &path)?);
         }
         if tenants.is_empty() {
             return Err(format!("no tenant manifests found in {}", dir.display()));
         }
-        Ok(Self { tenants })
+        let registry = Self { tenants };
+        registry.check_compatibility()?;
+        Ok(registry)
     }
     pub fn get(&self, name: &str) -> Option<&Tenant> {
         self.tenants.get(name)
@@ -94,6 +82,25 @@ impl Registry {
     }
     pub fn iter(&self) -> impl Iterator<Item = &Tenant> {
         self.tenants.values()
+    }
+
+    /// Check references between manifest sections that otherwise only fail when the dashboard
+    /// queries them. In particular, a liveness event must remain an enabled event contract.
+    pub fn check_compatibility(&self) -> Result<(), String> {
+        for tenant in self.iter() {
+            if let Some(liveness) = &tenant.dashboard.liveness
+                && !tenant
+                    .contracts
+                    .keys()
+                    .any(|(event_name, _)| event_name == &liveness.event_name)
+            {
+                return Err(format!(
+                    "manifest for tenant '{}' is incompatible: dashboard.liveness.event_name '{}' has no event contract",
+                    tenant.name, liveness.event_name
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -147,7 +154,6 @@ impl FleetDimension {
 #[serde(deny_unknown_fields)]
 struct Manifest {
     name: Option<String>,
-    extends: Option<String>,
     subject_kinds: Option<Vec<SubjectKindToml>>,
     dashboard: Option<DashboardToml>,
     events: Option<BTreeMap<String, EventToml>>,
@@ -191,9 +197,9 @@ struct EventToml {
     #[serde(default)]
     schema_version: u16,
     #[serde(default)]
-    disabled: bool,
-    #[serde(default)]
     fields: BTreeMap<String, FieldToml>,
+    #[serde(default)]
+    common_fields: BTreeMap<String, FieldToml>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -208,69 +214,53 @@ struct FieldToml {
     nullable: bool,
 }
 
-fn resolve(
+type CommonFields = BTreeMap<String, BTreeMap<String, FieldToml>>;
+
+fn resolve_common_fields(
     name: &str,
-    files: &BTreeMap<String, (std::path::PathBuf, Manifest)>,
-    default: &Manifest,
-    visiting: &mut HashSet<String>,
-) -> Result<Manifest, String> {
-    if !visiting.insert(name.to_owned()) {
-        return Err(format!("manifest extends cycle involving '{name}'"));
+    definitions: &CommonFields,
+    resolved: &mut HashMap<String, Vec<FieldSpec>>,
+    visiting: &mut Vec<String>,
+    path: &Path,
+) -> Result<Vec<FieldSpec>, String> {
+    if let Some(fields) = resolved.get(name) {
+        return Ok(fields.clone());
     }
-    let (path, current) = files
-        .get(name)
-        .ok_or_else(|| format!("manifest '{name}' referenced by extends does not exist"))?;
-    let base = match &current.extends {
-        Some(parent) if parent != "_default" => resolve(parent, files, default, visiting)?,
-        _ => default.clone(),
-    };
-    visiting.remove(name);
-    Ok(merge(base, current.clone(), path))
-}
-fn merge(mut base: Manifest, mut tenant: Manifest, _path: &Path) -> Manifest {
-    base.name = tenant.name.take().or(base.name);
-    base.extends = None;
-    if tenant.subject_kinds.is_some() {
-        base.subject_kinds = tenant.subject_kinds.take();
+    if let Some(index) = visiting.iter().position(|item| item == name) {
+        let mut cycle = visiting[index..].to_vec();
+        cycle.push(name.to_owned());
+        return Err(format!(
+            "invalid manifest {}: cyclic common field nesting: {}",
+            path.display(),
+            cycle.join(" -> ")
+        ));
     }
-    if tenant.services.is_some() {
-        base.services = tenant.services.take();
-    }
-    base.dashboard = merge_dashboard(base.dashboard.take(), tenant.dashboard.take());
-    if let Some(events) = tenant.events.take() {
-        let merged = base.events.get_or_insert_default();
-        for (name, event) in events {
-            if event.disabled {
-                merged.remove(&name);
-            } else {
-                merged.insert(name, event);
-            }
-        }
-    }
-    base
-}
-fn merge_dashboard(
-    base: Option<DashboardToml>,
-    tenant: Option<DashboardToml>,
-) -> Option<DashboardToml> {
-    match (base, tenant) {
-        (None, x) => x,
-        (x, None) => x,
-        (Some(mut a), Some(mut b)) => {
-            a.title = b.title.take().or(a.title);
-            a.subject_label = b.subject_label.take().or(a.subject_label);
-            if b.windows.is_some() {
-                a.windows = b.windows.take();
-            }
-            if b.fleet_dimensions.is_some() {
-                a.fleet_dimensions = b.fleet_dimensions.take();
-            }
-            if b.liveness.is_some() {
-                a.liveness = b.liveness.take();
-            }
-            Some(a)
-        }
-    }
+    let raw_fields = definitions.get(name).ok_or_else(|| {
+        format!(
+            "invalid manifest {}: common field type '{name}' does not exist",
+            path.display()
+        )
+    })?;
+
+    visiting.push(name.to_owned());
+    let fields = raw_fields
+        .iter()
+        .map(|(field_name, field)| {
+            build_field(
+                field_name.clone(),
+                field.clone(),
+                definitions,
+                resolved,
+                visiting,
+                path,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>();
+    visiting.pop();
+
+    let fields = fields?;
+    resolved.insert(name.to_owned(), fields.clone());
+    Ok(fields)
 }
 fn build_tenant(name: String, manifest: Manifest, path: &Path) -> Result<Tenant, String> {
     let subject_kinds = manifest
@@ -312,8 +302,31 @@ fn build_tenant(name: String, manifest: Manifest, path: &Path) -> Result<Tenant,
     if dashboard.title.is_empty() {
         dashboard.title = name.clone();
     }
+    let common_fields = manifest
+        .events
+        .as_ref()
+        .into_iter()
+        .flat_map(|events| events.iter())
+        .filter(|(_, event)| !event.common_fields.is_empty())
+        .map(|(name, event)| (name.clone(), event.common_fields.clone()))
+        .collect::<CommonFields>();
+    let mut resolved_common_fields = HashMap::new();
+    for common_name in common_fields.keys() {
+        resolve_common_fields(
+            common_name,
+            &common_fields,
+            &mut resolved_common_fields,
+            &mut Vec::new(),
+            path,
+        )?;
+    }
     let mut contracts = HashMap::new();
     for (event_name, event) in manifest.events.unwrap_or_default() {
+        // An events.<name>.common_fields table declares a local struct type. It is not an event
+        // contract unless the same table also declares fields.
+        if event.fields.is_empty() && !event.common_fields.is_empty() {
+            continue;
+        }
         if event_name.is_empty() || event_name.len() > 128 {
             return Err(format!(
                 "invalid manifest {}: invalid event name '{event_name}'",
@@ -328,7 +341,16 @@ fn build_tenant(name: String, manifest: Manifest, path: &Path) -> Result<Tenant,
         let fields = event
             .fields
             .into_iter()
-            .map(|(field_name, field)| build_field(field_name, field, path))
+            .map(|(field_name, field)| {
+                build_field(
+                    field_name,
+                    field,
+                    &common_fields,
+                    &mut resolved_common_fields,
+                    &mut Vec::new(),
+                    path,
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
         if contracts
             .insert(
@@ -363,7 +385,7 @@ fn build_dashboard(raw: DashboardToml, path: &Path) -> Result<DashboardSpec, Str
             path.display()
         )
     })?;
-    if windows.iter().any(|x| *x == 0) {
+    if windows.contains(&0) {
         return Err(format!(
             "invalid manifest {}: dashboard.windows values must be positive",
             path.display()
@@ -406,7 +428,14 @@ fn build_dashboard(raw: DashboardToml, path: &Path) -> Result<DashboardSpec, Str
         liveness,
     })
 }
-fn build_field(name: String, raw: FieldToml, path: &Path) -> Result<FieldSpec, String> {
+fn build_field(
+    name: String,
+    raw: FieldToml,
+    common_fields: &CommonFields,
+    resolved_common_fields: &mut HashMap<String, Vec<FieldSpec>>,
+    visiting: &mut Vec<String>,
+    path: &Path,
+) -> Result<FieldSpec, String> {
     let ty = match raw.ty.as_str() {
         "bool" => FieldType::Bool,
         "u64" => FieldType::U64,
@@ -426,6 +455,15 @@ fn build_field(name: String, raw: FieldToml, path: &Path) -> Result<FieldSpec, S
                 path.display()
             )
         })?),
+        common_name if common_fields.contains_key(common_name) => FieldType::Struct {
+            fields: resolve_common_fields(
+                common_name,
+                common_fields,
+                resolved_common_fields,
+                visiting,
+                path,
+            )?,
+        },
         other => {
             return Err(format!(
                 "invalid manifest {}: unknown field type '{other}'",
@@ -447,8 +485,9 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn planar_manifest_loads() {
+    fn checked_in_manifests_pass_compatibility() {
         let registry = Registry::load(Path::new("tenants")).unwrap();
+        registry.check_compatibility().unwrap();
         let planar = registry.get("planar").unwrap();
         assert_eq!(planar.subject_kinds[0].kind, "install");
         assert!(planar.contract("generation_requested", 1).is_some());
@@ -482,60 +521,109 @@ mod tests {
     }
 
     #[test]
-    fn tenant_overrides_replace_top_level_entries() {
-        let base: Manifest = toml::from_str(
+    fn common_fields_are_local_struct_types() {
+        let manifest: Manifest = toml::from_str(
             r#"
             [[subject_kinds]]
             kind = "install"
             id_shape = "uuid"
             [dashboard]
-            subject_label = "INSTALLS"
             windows = [1, 7, 30]
-            fleet_dimensions = ["platform"]
-            [events.old]
-            [events.keep.fields]
-            name = { type = "str", max_bytes = 8, required = true }
+            [events.model.common_fields]
+            model = { type = "str", max_bytes = 256, required = true }
+            load_ms = { type = "u64", required = true }
+            size_mb = { type = "u64", required = true }
+            [events.model_loaded.fields]
+            model = { type = "model", required = true }
         "#,
         )
         .unwrap();
-        let tenant: Manifest = toml::from_str(
-            r#"
-            [[subject_kinds]]
-            kind = "account"
-            id_shape = { opaque = { max_bytes = 16 } }
-            [dashboard]
-            subject_label = "ACCOUNTS"
-            windows = [2, 8, 31]
-            [events.keep]
-            [events.old]
-            disabled = true
-        "#,
-        )
-        .unwrap();
-        let merged = merge(base, tenant, Path::new("test.toml"));
-        let built = build_tenant("test".into(), merged, Path::new("test.toml")).unwrap();
-        assert_eq!(built.subject_kinds[0].kind, "account");
-        assert_eq!(built.dashboard.subject_label, "ACCOUNTS");
-        assert_eq!(built.dashboard.windows, [2, 8, 31]);
-        assert!(built.contract("old", 1).is_none());
-        assert!(built.contract("keep", 1).unwrap().fields.is_empty());
+        let built = build_tenant("test".into(), manifest, Path::new("test.toml")).unwrap();
+
+        assert!(built.contract("model", 1).is_none());
+        let field = &built.contract("model_loaded", 1).unwrap().fields[0];
+        assert!(field.required);
+        let FieldType::Struct { fields } = &field.ty else {
+            panic!("expected model to be a struct field");
+        };
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].name, "load_ms");
     }
 
     #[test]
-    fn unknown_fields_and_extends_cycles_are_rejected() {
-        assert!(toml::from_str::<Manifest>("unexpected = true").is_err());
-        let dir =
-            std::env::temp_dir().join(format!("telemetry-manifest-test-{}", std::process::id()));
+    fn common_fields_are_scoped_to_the_manifest() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+            [[subject_kinds]]
+            kind = "install"
+            id_shape = "uuid"
+            [dashboard]
+            windows = [1, 7, 30]
+            [events.model.common_fields]
+            name = { type = "str", max_bytes = 8 }
+            [events.event.fields]
+            model = { type = "model" }
+        "#,
+        )
+        .unwrap();
+        assert!(build_tenant("one".into(), manifest, Path::new("one.toml")).is_ok());
+
+        let other: Manifest = toml::from_str(
+            r#"
+            [[subject_kinds]]
+            kind = "install"
+            id_shape = "uuid"
+            [dashboard]
+            windows = [1, 7, 30]
+            [events.event.fields]
+            model = { type = "model" }
+        "#,
+        )
+        .unwrap();
+        let error = build_tenant("two".into(), other, Path::new("two.toml")).unwrap_err();
+        assert!(error.contains("unknown field type 'model'"));
+    }
+
+    #[test]
+    fn liveness_must_reference_an_enabled_event_contract() {
+        let dir = std::env::temp_dir().join(format!(
+            "telemetry-manifest-compat-test-{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         fs::write(
-            dir.join("_default.toml"),
-            "[[subject_kinds]]\nkind='x'\nid_shape='uuid'\n[dashboard]\nwindows=[1,2,3]\n",
+            dir.join("one.toml"),
+            "[[subject_kinds]]\nkind='x'\nid_shape='uuid'\n[dashboard]\nwindows=[1,2,3]\n[dashboard.liveness]\nevent_name='missing'\nping_interval_minutes=1\n[events.present]\n",
         )
         .unwrap();
-        fs::write(dir.join("one.toml"), "extends='two'\n").unwrap();
-        fs::write(dir.join("two.toml"), "extends='one'\n").unwrap();
-        assert!(Registry::load(&dir).unwrap_err().contains("cycle"));
+
+        let error = Registry::load(&dir).unwrap_err();
+
+        assert!(error.contains("no event contract"));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unknown_fields_and_cyclic_common_nesting_are_rejected() {
+        assert!(toml::from_str::<Manifest>("unexpected = true").is_err());
+        assert!(toml::from_str::<Manifest>("extends = 'other'").is_err());
+
+        let manifest: Manifest = toml::from_str(
+            r#"
+            [[subject_kinds]]
+            kind = "install"
+            id_shape = "uuid"
+            [dashboard]
+            windows = [1, 7, 30]
+            [events.a.common_fields]
+            value = { type = "b" }
+            [events.b.common_fields]
+            value = { type = "a" }
+            "#,
+        )
+        .unwrap();
+        let error = build_tenant("test".into(), manifest, Path::new("test.toml")).unwrap_err();
+        assert!(error.contains("cyclic common field nesting"));
     }
 }

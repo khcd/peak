@@ -26,15 +26,33 @@ Stores authenticated, versioned telemetry events in ClickHouse.
 ]
 ```
 
-The producer is derived from `Authorization: Bearer <secret>`. The service accepts only reviewed `(producer, event_name, schema_version)` contracts and flat, scalar `attributes`. It returns `200` with `{ "accepted": N, "rejected": [...] }`; accepted events are durable.
+The producer is derived from `Authorization: Bearer <secret>`. The service accepts only reviewed `(producer, event_name, schema_version)` contracts and declared `attributes`. It returns `200` with `{ "accepted": N, "rejected": [...] }`; accepted events are durable.
+
+`/v2/events` accepts uncompressed JSON plus `Content-Encoding: gzip` or `Content-Encoding: zstd`.
+Clients should compress batches before sending them; the service bounds both the encoded and
+decoded request body sizes.
 
 ## Tenants
 
-Tenant definitions are reviewed TOML manifests in [`tenants`](tenants). `_default.toml` supplies the
-shared contract and dashboard baseline; a tenant file replaces any event it defines and can disable
-an inherited event with `disabled = true`. Add a tenant by creating `tenants/<name>.toml`, adding a
-`<name>:<secret>` entry to `INGEST_KEYS`, and restarting the service. `MANIFEST_DIR` defaults to
-`tenants`.
+Tenant definitions are self-contained, reviewed TOML manifests in [`tenants`](tenants). Add a tenant
+by creating `tenants/<name>.toml`, adding a `<name>:<secret>` entry to `INGEST_KEYS`, and restarting
+the service. `MANIFEST_DIR` defaults to `tenants`.
+
+A manifest can define local reusable nested structs under `common_fields`. The type name is scoped to
+that manifest and can be used from an event field with `type = "<name>"`:
+
+```toml
+[events.model.common_fields]
+model = { type = "str", max_bytes = 256, required = true }
+load_ms = { type = "u64", required = true }
+size_mb = { type = "u64", required = true }
+
+[events.model_loaded.fields]
+model = { type = "model", required = true }
+```
+
+Nested struct definitions may refer to other local structs, but cyclic nesting is rejected when the
+manifest is loaded.
 
 Optionally set `services = ["your-service"]` in a tenant manifest to restrict
 `resource.service_name`. The wire format and ClickHouse schema remain unchanged.

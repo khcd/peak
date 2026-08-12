@@ -17,10 +17,13 @@ sha2 = "0.10"
 time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
 toml = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
-tower-http = { version = "0.6", features = ["limit", "trace"] }
+tower-http = { version = "0.6", features = ["decompression-gzip", "decompression-zstd", "limit", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
+flate2 = "1"
 pretty_assertions = "1"
+tower = { version = "0.5", features = ["util"] }
+zstd = "0.13"

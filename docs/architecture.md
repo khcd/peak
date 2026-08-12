@@ -47,21 +47,47 @@ query is reachable only by running the TUI. Reads have no HTTP auth story — th
 operator tool, `t`/`T` switches tenants freely, and ingest keys are write-scoped by construction
 (secret → `&'static Tenant`).
 
+Two async entry points, both returning plain data structs, both called from `event_loop` on tokio
+intervals with one in-flight request per tier. Results are discarded if the tenant or window
+changed while in flight; the last good snapshot stays on screen on error.
+
+| entry | tier | issues |
+|---|---|---|
+| `fast` | 1s poll, 2s timeout | `live_chart_sql`, `connected_sql`, one of `tail_initial_sql`/`tail_since_sql` |
+| `slow` | 10s poll, 10s timeout | `totals_sql`, `breakdown_sql`, `fleet_sql` |
+
 The seven query builders are:
 
-| builder | shape |
-|---|---|
-| `live_chart_sql` | `uniqExact(event_id)` by `toStartOfSecond(received_at)`, last 60s |
-| `connected_sql` | `uniqExact(subject_id)` where liveness is within `offline_after_minutes()` |
-| `tail_initial_sql` / `tail_since_sql` | raw row select, no aggregation, `LIMIT 50` |
-| `totals_sql` | one row, six `uniqExactIf` expressions over three day windows |
-| `breakdown_sql` | top 12 event names |
-| `fleet_sql` | `UNION ALL` per fleet dimension, then group |
+| builder | shape | binds |
+|---|---|---|
+| `live_chart_sql` | `uniqExact(event_id)` by `toStartOfSecond(received_at)`, last 60s | 1 |
+| `connected_sql` | `uniqExact(subject_id)` where liveness is within `offline_after_minutes()` | 2 |
+| `tail_initial_sql` / `tail_since_sql` | raw row select, no aggregation, `LIMIT 50` | 1 / 2 |
+| `totals_sql` | one row, six `uniqExactIf` expressions over three day windows | 1 |
+| `breakdown_sql` | top 12 event names | 1 |
+| `fleet_sql` | `UNION ALL` per fleet dimension, then group | **N** (one per dimension) |
 
-Every count is `uniqExact`, never `count()`: `ReplacingMergeTree(received_at)` means duplicate
-`event_id` rows exist until a background merge. Windows are day-aligned and resolve in the
-ClickHouse session timezone set from `DASHBOARD_TIMEZONE` (default `UTC`). Liveness is measured on
-`received_at`, not `occurred_at`, so a device with a wrong wall clock still counts.
+Notes that constrain any refactor:
+
+- **Every count is `uniqExact`, never `count()`.** `ReplacingMergeTree(received_at)` means duplicate
+  `event_id` rows exist until a background merge, so `count()` is simply wrong here.
+- **Windows are day-aligned, not rolling.** `Window::since` emits
+  `toStartOfDay(now()) - INTERVAL n-1 DAY`, so an N-day window covers N whole days including today.
+  Two tests exist purely to keep it that way.
+- Day boundaries resolve in the ClickHouse **session** timezone, set once from
+  `config::dashboard_timezone()` (`DASHBOARD_TIMEZONE`, default UTC). An unknown name makes
+  ClickHouse reject the query, so the health check doubles as its validation.
+- Liveness is measured on `received_at`, not `occurred_at`, deliberately — a device with a wrong
+  wall clock still counts.
+- **`fleet_sql`'s bind count is kept in sync by a loop in the *caller*.** That coupling is invisible
+  and is the one genuinely fragile thing in this file. Under-binding fails at `finish()`, so it is a
+  runtime error rather than an injection — but it is still a footgun.
+- **`attributes` is never read.** It is a JSON document stored as `String`; nothing in
+  `src/dashboard/` mentions it. Any attribute-level analytics needs `JSONExtract*` and would be the
+  first full-scan query in the project.
+- `FleetDimension` (`src/manifest.rs`) is a closed enum whose `name()`/`column()` return
+  `&'static str`. **That closedness — not escaping — is what makes the interpolation in `fleet_sql`
+  safe.** Widening it to accept caller-supplied column names would turn it into an injection.
 
 ## Manifest and contract internals
 
@@ -94,14 +120,21 @@ there is no admin API, key store, or revocation without restart.
 
 ## Driver facts — `clickhouse` 0.13.3
 
-- `.bind()` is client-side substitution, not a prepared statement; over- and under-binding are
-  detected by the driver.
+- **`.bind()` is client-side substitution, not a prepared statement.** `Part::Arg` placeholders are
+  replaced in order with escaped text (escapes `\ ' \` \t \n`). Over-binding errors with
+  `"unexpected bind(), all arguments are already bound"`; under-binding with
+  `"unbound query argument"` at `finish()`.
 - `Bind` is blanket-implemented for `Serialize`. Binding a Rust enum directly serializes it as a
-  tagged enum, not its inner primitive; match and bind the primitive instead.
+  *tagged* enum, not its inner primitive; match and bind the primitive instead.
 - `Query::sql_display()` renders post-bind SQL and is useful as a free dry run.
-- `fetch_bytes(format)` is the way to handle a dynamic column set; `fetch_all::<T>()` needs a
-  compile-time row struct.
+- `fetch_bytes(format)` returns a `BytesCursor` implementing `AsyncBufRead` and appends
+  ` FORMAT <fmt>`. It is the only way to handle a **dynamic column set** —
+  `#[derive(clickhouse::Row)]` needs a compile-time struct, so `fetch_all::<T>()` cannot express one.
 - POST queries already get `readonly=1` appended.
+- `serde_json::Map` is a `BTreeMap` here (no `preserve_order` feature), so decoding `JSONEachRow`
+  into maps **loses column order**. `JSONCompactEachRowWithNamesAndTypes` preserves it.
+- Explicit `toUInt32`/`toUInt64` casts in the read SQL are required for RowBinary type matching
+  against the row structs — they are not cosmetic.
 - Writes never build SQL: `insert_rows` uses `client.insert("events")` with
   `async_insert=1` + `wait_for_async_insert=1`, so a 200 means ClickHouse acknowledged. There are
   no transactions; a batch is not atomic.

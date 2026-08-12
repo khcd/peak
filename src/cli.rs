@@ -118,6 +118,7 @@ mod tests {
             .is_err()
         );
         assert!(parse(["keygen".into()], registry()).is_err());
-        assert!(parse(["keygen".into(), "demo".into(), "extra".into()], registry()).is_err());
+        let tenant_name = registry().first().unwrap().name.clone();
+        assert!(parse(["keygen".into(), tenant_name, "extra".into()], registry()).is_err());
     }
 }

@@ -73,10 +73,18 @@ pub(crate) fn valid_producer_name(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
+/// Mints a secret that satisfies `from_pairs` by construction: hex is well over the 16-byte
+/// minimum, and it contains neither of the `,` and `:` delimiters the parser splits on.
 pub(crate) fn generate_secret() -> String {
+    use std::fmt::Write;
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).expect("operating system random number generator unavailable");
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    bytes
+        .iter()
+        .fold(String::with_capacity(64), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
 }
 
 #[cfg(test)]
@@ -105,13 +113,15 @@ mod tests {
     #[test]
     fn generated_secret_authenticates_for_the_right_tenant() {
         let registry = Box::leak(Box::new(Registry::load(Path::new("tenants")).unwrap()));
+        let tenant_name = registry.first().unwrap().name.clone();
         let secret = generate_secret();
-        let producers = ProducerRegistry::from_pairs(&format!("demo:{secret}"), registry).unwrap();
+        let producers =
+            ProducerRegistry::from_pairs(&format!("{tenant_name}:{secret}"), registry).unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {secret}")).unwrap(),
         );
-        assert_eq!(producers.authenticate(&headers).unwrap().name, "demo");
+        assert_eq!(producers.authenticate(&headers).unwrap().name, tenant_name);
     }
 }

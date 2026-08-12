@@ -5,7 +5,7 @@ edition = "2024"
 license = "MIT"
 description = "peak: authenticated multi-tenant telemetry ingestion backed by ClickHouse"
 publish = false
-repository = "https://github.com/khcd/telemetry-service"
+repository = "https://github.com/khcd/peak"
 readme = "README.md"
 
 [dependencies]

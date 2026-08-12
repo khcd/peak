@@ -5,6 +5,7 @@ mod contract;
 mod dashboard;
 mod error;
 mod event;
+mod manifest;
 
 use std::{
     sync::Arc,
@@ -22,7 +23,9 @@ use clickhouse::{Client, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::signal;
-use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
+use tower_http::{
+    decompression::RequestDecompressionLayer, limit::RequestBodyLimitLayer, trace::TraceLayer,
+};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -33,7 +36,7 @@ use crate::{
     event::{EventRow, IncomingEvent},
 };
 
-const INSERT_TABLE: &str = "telemetry.events";
+const INSERT_TABLE: &str = "events";
 
 #[derive(Clone)]
 struct AppState {
@@ -58,25 +61,34 @@ struct HealthRow {
 
 #[tokio::main]
 async fn main() {
-    match cli::Mode::from_args().unwrap_or_else(|message| {
+    let registry = Box::leak(Box::new(
+        manifest::Registry::load(std::path::Path::new(&config::manifest_dir())).unwrap_or_else(
+            |message| {
+                eprintln!("invalid tenant manifests: {message}");
+                std::process::exit(2);
+            },
+        ),
+    ));
+    match cli::Mode::from_args(registry).unwrap_or_else(|message| {
         eprintln!("{message}");
         std::process::exit(2);
     }) {
-        cli::Mode::Serve => serve().await,
-        cli::Mode::Dashboard { producer } => dashboard::run(producer).await,
+        cli::Mode::Serve => serve(registry).await,
+        cli::Mode::Dashboard { tenant } => dashboard::run(registry, tenant).await,
     }
 }
 
-async fn serve() {
+async fn serve(registry: &'static manifest::Registry) {
     init_logging();
     let config = Config::from_env().unwrap_or_else(|message| {
         error!(%message, "invalid configuration");
         std::process::exit(2);
     });
-    let producers = ProducerRegistry::from_pairs(&config.ingest_keys).unwrap_or_else(|message| {
-        error!(%message, "invalid ingest-key registry");
-        std::process::exit(2);
-    });
+    let producers =
+        ProducerRegistry::from_pairs(&config.ingest_keys, registry).unwrap_or_else(|message| {
+            error!(%message, "invalid ingest-key registry");
+            std::process::exit(2);
+        });
     let state = AppState {
         clickhouse: config.clickhouse.client(),
         producers: Arc::new(producers),
@@ -102,7 +114,18 @@ async fn serve() {
 fn router(state: AppState, max_body_bytes: usize) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
-        .route("/v2/events", post(ingest_events))
+        .route(
+            "/v2/events",
+            post(ingest_events)
+                // This limit is inside decompression, so it caps decoded bytes as well as
+                // guarding the JSON extractor from a compressed-body expansion bomb.
+                .layer::<_, std::convert::Infallible>(RequestBodyLimitLayer::new(max_body_bytes))
+                .layer::<_, std::convert::Infallible>(
+                    RequestDecompressionLayer::new().gzip(true).zstd(true),
+                ),
+        )
+        // Keep the existing limit outside decompression too: compressed bytes are bounded before
+        // the decoder runs, while the route-local limit above bounds the decompressed body.
         .layer(RequestBodyLimitLayer::new(max_body_bytes))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -255,14 +278,24 @@ mod tests {
     use crate::{
         auth::ProducerRegistry,
         event::{IncomingResource, IncomingSubject},
+        manifest::{Registry, Tenant},
     };
+    use axum::http::Request;
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+    use tower::ServiceExt;
     use uuid::Uuid;
 
     fn state() -> AppState {
+        let tenant_name = registry().first().unwrap().name.clone();
         AppState {
             clickhouse: Client::default(),
-            producers: Arc::new(ProducerRegistry::from_pairs("planar:this-is-a-test-key").unwrap()),
+            producers: Arc::new(
+                ProducerRegistry::from_pairs(
+                    &format!("{tenant_name}:this-is-a-test-key"),
+                    registry(),
+                )
+                .unwrap(),
+            ),
             limits: Arc::new(Limits {
                 max_attributes_bytes: 100,
                 max_event_age_days: 190,
@@ -285,7 +318,7 @@ mod tests {
             },
             session_id: Some("session".into()),
             resource: IncomingResource {
-                service_name: "planar".into(),
+                service_name: "test-service".into(),
                 service_version: "0.1.0".into(),
                 platform: Some("macOS".into()),
                 platform_version: Some("15.0".into()),
@@ -293,8 +326,13 @@ mod tests {
             attributes: serde_json::json!({}),
         }
     }
-    fn producer() -> &'static crate::contract::ProducerSpec {
-        crate::contract::PRODUCERS.first().unwrap()
+    fn registry() -> &'static Registry {
+        Box::leak(Box::new(
+            Registry::load(std::path::Path::new("tenants")).unwrap(),
+        ))
+    }
+    fn producer() -> &'static Tenant {
+        registry().first().unwrap()
     }
     #[test]
     fn valid_event_round_trips_to_row() {
@@ -370,8 +408,53 @@ mod tests {
     }
     #[test]
     fn rejects_unknown_envelope_fields() {
-        let json = serde_json::json!({ "event_id": Uuid::nil(), "event_name": "session_start", "schema_version": 1, "occurred_at": "2026-08-05T12:34:56Z", "occurredAt": "bad", "subject": { "kind": "install", "id": Uuid::nil() }, "resource": { "service_name": "planar", "service_version": "0.1.0" }, "attributes": {} });
+        let json = serde_json::json!({ "event_id": Uuid::nil(), "event_name": "session_start", "schema_version": 1, "occurred_at": "2026-08-05T12:34:56Z", "occurredAt": "bad", "subject": { "kind": "install", "id": Uuid::nil() }, "resource": { "service_name": "test-service", "service_version": "0.1.0" }, "attributes": {} });
         assert!(serde_json::from_value::<IncomingEvent>(json).is_err());
+    }
+    #[tokio::test]
+    async fn gzip_request_is_decompressed_before_json_parsing() {
+        let body = gzip(b"not json");
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v2/events")
+            .header("authorization", "Bearer this-is-a-test-key")
+            .header("content-encoding", "gzip")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+
+        let response = router(state(), 1024).oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+    #[tokio::test]
+    async fn zstd_request_is_decompressed_before_json_parsing() {
+        let body = zstd::stream::encode_all(b"not json".as_slice(), 0).unwrap();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v2/events")
+            .header("authorization", "Bearer this-is-a-test-key")
+            .header("content-encoding", "zstd")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+
+        let response = router(state(), 1024).oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+    #[tokio::test]
+    async fn decompressed_request_body_is_limited_after_decoding() {
+        let body = gzip(&vec![b' '; 512]);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v2/events")
+            .header("authorization", "Bearer this-is-a-test-key")
+            .header("content-encoding", "gzip")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+
+        let response = router(state(), 128).oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::PAYLOAD_TOO_LARGE);
     }
     #[test]
     fn only_uses_cloudflare_country_when_explicitly_trusted() {
@@ -381,5 +464,13 @@ mod tests {
         let mut trusted = state();
         trusted.trust_cloudflare_headers = true;
         assert_eq!(country_from_headers(&headers, &trusted), "AU");
+    }
+
+    fn gzip(body: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(body).unwrap();
+        encoder.finish().unwrap()
     }
 }

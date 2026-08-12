@@ -1,4 +1,4 @@
-# Planar telemetry ingest
+# Telemetry ingest
 
 Stores authenticated, versioned telemetry events in ClickHouse.
 
@@ -16,7 +16,7 @@ Stores authenticated, versioned telemetry events in ClickHouse.
     "subject": { "kind": "install", "id": "1dd9d9c1-0bb4-4b21-b665-7f79d9f3e256" },
     "session_id": "679590a4-eea6-4e91-aeb0-23c8aa90ccaa",
     "resource": {
-      "service_name": "planar",
+      "service_name": "example-client",
       "service_version": "0.1.0",
       "platform": "macOS",
       "platform_version": "15.0"
@@ -26,7 +26,38 @@ Stores authenticated, versioned telemetry events in ClickHouse.
 ]
 ```
 
-The producer is derived from `Authorization: Bearer <secret>`. The service accepts only reviewed `(producer, event_name, schema_version)` contracts and flat, scalar `attributes`. It returns `200` with `{ "accepted": N, "rejected": [...] }`; accepted events are durable.
+The producer is derived from `Authorization: Bearer <secret>`. The service accepts only reviewed `(producer, event_name, schema_version)` contracts and declared `attributes`. It returns `200` with `{ "accepted": N, "rejected": [...] }`; accepted events are durable.
+
+`/v2/events` accepts uncompressed JSON plus `Content-Encoding: gzip` or `Content-Encoding: zstd`.
+Clients should compress batches before sending them; the service bounds both the encoded and
+decoded request body sizes.
+
+## Tenants
+
+Tenant definitions are self-contained, reviewed TOML manifests in [`tenants`](tenants). The
+[`_example.toml`](tenants/_example.toml) file documents the available manifest shapes and is
+ignored by the loader. Add a tenant by copying it to `tenants/<name>.toml`, adding a
+`<name>:<secret>` entry to `INGEST_KEYS`, and restarting the service. `MANIFEST_DIR` defaults to
+`tenants`.
+
+A manifest can define local reusable nested structs under `common_fields`. The type name is scoped to
+that manifest and can be used from an event field with `type = "<name>"`:
+
+```toml
+[events.model.common_fields]
+model = { type = "str", max_bytes = 256, required = true }
+load_ms = { type = "u64", required = true }
+size_mb = { type = "u64", required = true }
+
+[events.model_loaded.fields]
+model = { type = "model", required = true }
+```
+
+Nested struct definitions may refer to other local structs, but cyclic nesting is rejected when the
+manifest is loaded.
+
+Optionally set `services = ["your-service"]` in a tenant manifest to restrict
+`resource.service_name`. The wire format and ClickHouse schema remain unchanged.
 
 ## Run locally
 
@@ -40,6 +71,46 @@ set -a && . ./.env && set +a
 `CLICKHOUSE_USER` and `CLICKHOUSE_PASSWORD` must be set explicitly. `CLICKHOUSE_USER` falls back to
 `default`, but the ClickHouse image disables the `default` account as soon as `CLICKHOUSE_USER` is
 set on the container, so that fallback can never authenticate — it fails with `Code: 194`.
+
+## Run with Docker
+
+Docker Compose starts ClickHouse and the telemetry handler together. Copy the example environment
+file, set a real ingest secret, and provide a domain for the optional Caddy reverse proxy:
+
+```sh
+cp .env.example .env
+openssl rand -hex 24
+# Put the generated value into INGEST_KEYS, for example:
+# INGEST_KEYS=tenant-name:<generated-value>
+# For a local-only run, set TELEMETRY_DOMAIN=localhost.
+# For a public deployment, set it to the DNS name pointing at this host.
+```
+
+Start the complete stack, including Caddy on ports 80 and 443:
+
+```sh
+docker compose up -d --build
+```
+
+For local development, the handler is also exposed directly at
+`http://127.0.0.1:8081`; Caddy is not required for local clients. The `handler` service still
+needs `TELEMETRY_DOMAIN` in `.env` because Compose validates the full file, even when only these
+services are selected:
+
+```sh
+docker compose up -d --build clickhouse handler
+curl http://127.0.0.1:8081/healthz
+```
+
+Follow service logs or stop the stack with:
+
+```sh
+docker compose logs -f handler
+docker compose down
+```
+
+ClickHouse data is kept in the `clickhouse-data` Docker volume. The initial schema is applied only
+when that volume is first created.
 
 ## Service settings
 
@@ -68,18 +139,30 @@ See `.env.example` for configuration defaults.
 
 ## Terminal dashboard
 
-The same binary includes a read-only ClickHouse dashboard for a configured producer. It does not
+The same binary includes a read-only ClickHouse dashboard for a configured tenant. It does not
 need `INGEST_KEYS`, so it can run inside the production network without an ingest secret:
 
 ```sh
-docker compose exec -it handler planar-telemetry-ingest dashboard planar
+docker compose exec -it handler telemetry-ingest dashboard tenant-name
 ```
+
+The Docker dashboard command uses the handler container's network and configuration, so it connects
+to ClickHouse at the internal Compose address. Start the stack first, then replace `tenant-name`
+with any tenant name declared in `tenants/<name>.toml`:
+
+```sh
+docker compose up -d --build clickhouse handler
+docker compose exec -it handler telemetry-ingest dashboard tenant-name
+```
+
+Press `q` or Escape to leave the dashboard. The dashboard process exits without stopping the
+background handler or ClickHouse containers.
 
 Or, when running locally, with `.env` loaded as above:
 
 ```sh
 set -a && . ./.env && set +a
-cargo run -- dashboard planar
+cargo run -- dashboard tenant-name
 ```
 
 The dashboard uses `received_at` for its live incoming-events chart and `occurred_at` for the
@@ -93,13 +176,13 @@ whether the dashboard runs on a laptop in Sydney or via `docker compose exec` in
 container. The active timezone is shown in the header. The live chart is unaffected — it is a
 rolling 60 seconds of wall time.
 
-Press `1`, `2`, or `3` for today, 7 days, or 30 days; `p` pauses
-polling, `r` refreshes, and `q` (or Escape) exits. If ClickHouse is temporarily unavailable, the
+Press `1`, `2`, or `3` for the manifest's three configured windows; `t` switches to the next
+tenant and `Shift+T` to the previous one. `p` pauses polling, `r` refreshes, and `q` (or Escape)
+exits. If ClickHouse is temporarily unavailable, the
 last successful snapshot stays on screen and polling resumes automatically when it recovers.
 
-The `CONNECTED` panel counts distinct installs that emitted a `live_ping` in the last 11 minutes.
-The planar client pings every 5 minutes, so the threshold deliberately clears two intervals — at
-exactly 5 minutes a healthy client would sit on the boundary and flicker in and out of the count.
+The `CONNECTED` panel follows each manifest's optional liveness event. Its offline threshold is
+twice the declared ping interval plus one minute; tenants without liveness show `--`.
 Liveness is measured on `received_at`, so an install whose wall clock is wrong is still counted
 correctly. A sleeping or suspended device stops pinging and drops out of the count, as intended.
 

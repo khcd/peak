@@ -4,20 +4,21 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::query::{CountRow, FleetRow, SecondBucket, TailRow, Totals, Window};
+use crate::manifest::Tenant;
 
 const TAIL_CAPACITY: usize = 200;
 
 pub struct App {
-    pub producer: &'static str,
+    pub tenant: &'static Tenant,
     /// Reporting timezone every calendar-day window resolves in. Shown in the header so a figure
     /// read off this dashboard is never ambiguous about which "today" it means.
     pub timezone: String,
     pub window: Window,
     pub paused: bool,
     pub buckets: [u64; 60],
-    /// Distinct installs that pinged within `OFFLINE_AFTER_MINUTES`. A sleeping or suspended
-    /// device stops pinging and correctly drops out of this count.
-    pub connected: u64,
+    /// Distinct subjects that have emitted the tenant's liveness event recently enough. A sleeping
+    /// or suspended device stops pinging and correctly drops out of this count.
+    pub connected: Option<u64>,
     pub totals: Totals,
     pub breakdown: Vec<CountRow>,
     pub fleet: Vec<FleetRow>,
@@ -32,19 +33,22 @@ pub struct App {
 
 impl Default for App {
     fn default() -> Self {
-        Self::new("planar", "UTC".to_owned())
+        let registry = Box::leak(Box::new(
+            crate::manifest::Registry::load(std::path::Path::new("tenants")).unwrap(),
+        ));
+        Self::new(registry.first().unwrap(), "UTC".to_owned())
     }
 }
 
 impl App {
-    pub fn new(producer: &'static str, timezone: String) -> Self {
+    pub fn new(tenant: &'static Tenant, timezone: String) -> Self {
         Self {
-            producer,
+            tenant,
             timezone,
             window: Window::D7,
             paused: false,
             buckets: [0; 60],
-            connected: 0,
+            connected: None,
             totals: Totals::default(),
             breakdown: Vec::new(),
             fleet: Vec::new(),
@@ -58,7 +62,12 @@ impl App {
         }
     }
 
-    pub fn apply_fast(&mut self, buckets: Vec<SecondBucket>, rows: Vec<TailRow>, connected: u64) {
+    pub fn apply_fast(
+        &mut self,
+        buckets: Vec<SecondBucket>,
+        rows: Vec<TailRow>,
+        connected: Option<u64>,
+    ) {
         let newest = buckets
             .iter()
             .map(|row| row.bucket)
@@ -70,6 +79,22 @@ impl App {
         self.insert_tail(rows);
         self.fast_ok = Some(OffsetDateTime::now_utc());
         self.fast_error = None;
+    }
+
+    pub fn switch_tenant(&mut self, tenant: &'static Tenant) {
+        self.tenant = tenant;
+        self.buckets = [0; 60];
+        self.tail.clear();
+        self.tail_ids.clear();
+        self.watermark = None;
+        self.connected = None;
+        self.totals = Totals::default();
+        self.breakdown.clear();
+        self.fleet.clear();
+        self.fast_ok = None;
+        self.slow_ok = None;
+        self.fast_error = None;
+        self.slow_error = None;
     }
 
     pub fn apply_slow(&mut self, totals: Totals, breakdown: Vec<CountRow>, fleet: Vec<FleetRow>) {

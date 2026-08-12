@@ -8,7 +8,10 @@ use futures_util::StreamExt;
 use ratatui::crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use serde::Deserialize;
 
-use crate::{config::ClickhouseConfig, contract::ProducerSpec};
+use crate::{
+    config::ClickhouseConfig,
+    manifest::{Registry, Tenant},
+};
 
 use self::{app::App, query::Window};
 
@@ -17,7 +20,7 @@ struct HealthRow {
     value: u8,
 }
 
-pub async fn run(producer: &'static ProducerSpec) {
+pub async fn run(registry: &'static Registry, tenant: &'static Tenant) {
     let config = match ClickhouseConfig::from_env() {
         Ok(config) => config,
         Err(message) => {
@@ -56,7 +59,7 @@ pub async fn run(producer: &'static ProducerSpec) {
             return;
         }
     };
-    let result = event_loop(&mut terminal, client, producer, timezone).await;
+    let result = event_loop(&mut terminal, client, registry, tenant, timezone).await;
     ratatui::restore();
     if let Err(error) = result {
         eprintln!("dashboard stopped: {error}");
@@ -66,10 +69,11 @@ pub async fn run(producer: &'static ProducerSpec) {
 async fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     client: clickhouse::Client,
-    producer: &'static ProducerSpec,
+    registry: &'static Registry,
+    tenant: &'static Tenant,
     timezone: String,
 ) -> Result<(), String> {
-    let mut app = App::new(producer.name, timezone);
+    let mut app = App::new(tenant, timezone);
     let mut input = EventStream::new();
     let mut fast = tokio::time::interval(Duration::from_secs(1));
     let mut slow = tokio::time::interval(Duration::from_secs(10));
@@ -95,6 +99,8 @@ async fn event_loop(
                             KeyCode::Char('3') => { app.window = Window::D30; slow.reset_immediately(); }
                             KeyCode::Char('p') => app.paused = !app.paused,
                             KeyCode::Char('r') => { fast.reset_immediately(); slow.reset_immediately(); }
+                            KeyCode::Char('t') => { switch_tenant(&mut app, registry, true); fast.reset_immediately(); slow.reset_immediately(); }
+                            KeyCode::Char('T') => { switch_tenant(&mut app, registry, false); fast.reset_immediately(); slow.reset_immediately(); }
                             _ => {}
                         }
                     }
@@ -107,45 +113,62 @@ async fn event_loop(
                 fast_in_flight = true;
                 let client = client.clone();
                 let watermark = app.watermark;
+                let tenant = app.tenant;
                 let sender = fast_tx.clone();
                 tokio::spawn(async move {
-                    let result = tokio::time::timeout(Duration::from_secs(2), query::fast(&client, producer, watermark))
+                    let result = tokio::time::timeout(Duration::from_secs(2), query::fast(&client, tenant, watermark))
                         .await
                         .map_err(|_| "fast query timed out".to_owned())
                         .and_then(|result| result.map_err(|error| error.to_string()));
-                    let _ = sender.send(result).await;
+                    let _ = sender.send((tenant.name.clone(), result)).await;
                 });
             }
             _ = slow.tick(), if !app.paused && !slow_in_flight => {
                 slow_in_flight = true;
                 let client = client.clone();
                 let window = app.window;
+                let tenant = app.tenant;
                 let sender = slow_tx.clone();
                 tokio::spawn(async move {
-                    let result = tokio::time::timeout(Duration::from_secs(10), query::slow(&client, producer, window))
+                    let result = tokio::time::timeout(Duration::from_secs(10), query::slow(&client, tenant, window))
                         .await
                         .map_err(|_| "slow query timed out".to_owned())
                         .and_then(|result| result.map_err(|error| error.to_string()));
-                    let _ = sender.send((window, result)).await;
+                    let _ = sender.send((tenant.name.clone(), window, result)).await;
                 });
             }
             result = fast_rx.recv(), if fast_in_flight => {
                 fast_in_flight = false;
                 match result {
-                    Some(Ok((buckets, tail, connected))) => app.apply_fast(buckets, tail, connected),
-                    Some(Err(error)) => app.fast_error = Some(error),
+                    Some((name, Ok((buckets, tail, connected)))) if name == app.tenant.name => app.apply_fast(buckets, tail, connected),
+                    Some((name, Err(error))) if name == app.tenant.name => app.fast_error = Some(error),
+                    Some(_) => fast.reset_immediately(),
                     None => app.fast_error = Some("fast query worker stopped".into()),
                 }
             }
             result = slow_rx.recv(), if slow_in_flight => {
                 slow_in_flight = false;
                 match result {
-                    Some((window, Ok((totals, breakdown, fleet)))) if window == app.window => app.apply_slow(totals, breakdown, fleet),
-                    Some((window, Err(error))) if window == app.window => app.slow_error = Some(error),
+                    Some((name, window, Ok((totals, breakdown, fleet)))) if name == app.tenant.name && window == app.window => app.apply_slow(totals, breakdown, fleet),
+                    Some((name, window, Err(error))) if name == app.tenant.name && window == app.window => app.slow_error = Some(error),
                     Some(_) => slow.reset_immediately(),
                     None => app.slow_error = Some("slow query worker stopped".into()),
                 }
             }
         }
     }
+}
+
+fn switch_tenant(app: &mut App, registry: &'static Registry, forward: bool) {
+    let tenants = registry.iter().collect::<Vec<_>>();
+    let current = tenants
+        .iter()
+        .position(|tenant| tenant.name == app.tenant.name)
+        .unwrap_or(0);
+    let next = if forward {
+        (current + 1) % tenants.len()
+    } else {
+        (current + tenants.len() - 1) % tenants.len()
+    };
+    app.switch_tenant(tenants[next]);
 }

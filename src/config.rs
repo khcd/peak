@@ -84,6 +84,10 @@ impl Config {
     }
 }
 
+pub fn manifest_dir() -> String {
+    env_or("MANIFEST_DIR", "tenants")
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileConfig {

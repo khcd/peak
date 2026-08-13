@@ -44,8 +44,8 @@ decoded request body sizes.
 Tenant definitions are self-contained, reviewed TOML manifests in [`tenants`](tenants). The
 [`_example.toml`](tenants/_example.toml) file documents the available manifest shapes and is
 ignored by the loader. Add a tenant by copying it to `tenants/<name>.toml`, adding a
-`<name>:<secret>` entry to `INGEST_KEYS`, generated with `peak keygen <name>`, and restarting the
-service. `MANIFEST_DIR` defaults to `tenants`.
+`<name>:<secret>` entry to `INGEST_KEYS` (see [Generate an ingest key](#generate-an-ingest-key)),
+and restarting the service. `MANIFEST_DIR` defaults to `tenants`.
 
 A manifest can define local reusable nested structs under `common_fields`. The type name is scoped to
 that manifest and can be used from an event field with `type = "<name>"`:
@@ -66,11 +66,38 @@ manifest is loaded.
 Optionally set `services = ["your-service"]` in a tenant manifest to restrict
 `resource.service_name`. The wire format and ClickHouse schema remain unchanged.
 
+## Generate an ingest key
+
+`keygen` prints a ready-to-paste `INGEST_KEYS` entry — the tenant name, a colon, and a 64-character
+hex secret. It needs neither ClickHouse nor an existing ingest key, so it is the first thing you run
+on a fresh checkout:
+
+```sh
+cargo run -- keygen demo
+```
+
+The `demo:<secret>` pair goes to stdout and the restart hint to stderr, so the pair can be
+redirected straight into a file. Restart the service after updating `INGEST_KEYS`.
+
+Without a Rust toolchain, any 64 hex characters work — the format is chosen so that it clears the
+16-byte minimum and contains neither of the `,` and `:` characters `INGEST_KEYS` is split on:
+
+```sh
+printf 'demo:%s\n' "$(openssl rand -hex 32)"
+```
+
+Once the stack is already running, a key for an *additional* tenant can be generated in the
+container. This cannot bootstrap the first key — Compose will not start any service, `exec`
+included, until `INGEST_KEYS` already has a value:
+
+```sh
+docker compose exec -it handler peak keygen another-tenant
+```
+
 ## Run locally
 
-Copy `.env.example` to `.env`, generate an ingest key, and set `INGEST_KEYS` to the generated entry.
-Load it into
-the shell before every command below:
+Copy `.env.example` to `.env` and set `INGEST_KEYS` to a generated entry. Load it into the shell
+before every command below:
 
 ```sh
 set -a && . ./.env && set +a
@@ -89,12 +116,16 @@ optional Caddy reverse proxy:
 ```sh
 cp .env.example .env
 cargo run -- keygen demo
-# Put the generated value into INGEST_KEYS, for example:
-# INGEST_KEYS=demo:<generated-value>
-# Also replace CLICKHOUSE_PASSWORD=CHANGE_ME.
-# For a local-only run, set TELEMETRY_DOMAIN=localhost.
-# For a public deployment, set it to the DNS name pointing at this host.
 ```
+
+Then edit `.env`. Compose interpolates the whole file before it starts anything, so all three of
+these must have real values or every `docker compose` command fails with
+`required variable ... is missing a value`:
+
+- `INGEST_KEYS` — the generated `demo:<secret>` pair, replacing `CHANGE_ME`.
+- `CLICKHOUSE_PASSWORD` — replacing `CHANGE_ME`.
+- `TELEMETRY_DOMAIN` — `localhost` for a local-only run, or the DNS name pointing at this host for
+  a public deployment.
 
 Start the complete stack, including Caddy on ports 80 and 443:
 
@@ -136,7 +167,7 @@ service and ClickHouse; MergeTree storage compression is configured independentl
 Recreate the disposable local table:
 
 ```sh
-docker exec -i clickhouse clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --multiquery \
+docker compose exec -T clickhouse clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --multiquery \
   < deploy/clickhouse/migrations/002_rebuild_for_v2.sql
 ```
 
@@ -176,19 +207,6 @@ set -a && . ./.env && set +a
 cargo run -- dashboard demo
 ```
 
-### Generate an ingest key
-
-`keygen` prints a ready-to-paste `INGEST_KEYS` entry. It needs neither ClickHouse nor an existing
-ingest key:
-
-```sh
-cargo run -- keygen demo
-docker compose exec -it handler peak keygen demo
-```
-
-The hint goes to stderr, so the `demo:<64-hex-character-secret>` pair on stdout can be redirected
-or pasted into `.env`; restart the service after updating `INGEST_KEYS`.
-
 The dashboard uses `received_at` for its live incoming-events chart and `occurred_at` for the
 historical totals and breakdowns.
 
@@ -219,3 +237,11 @@ worthless once the connected-clients window has passed. Existing deployments pic
 
 `deploy/clickhouse/migrations/003_received_at_skip_index.sql` is an optional performance migration
 for the live chart; it is not applied by the normal setup.
+
+## Security
+
+Please do not report vulnerabilities in a public issue — see [SECURITY.md](SECURITY.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).

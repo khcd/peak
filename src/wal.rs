@@ -114,6 +114,13 @@ impl Wal {
     /// Removes exactly `count` rows from the front. The caller serializes this with append and
     /// keeps the ClickHouse success-before-ack ordering, so a failed rewrite leaves the old WAL
     /// intact and only causes a harmless replay.
+    ///
+    /// Acking is row-granular, not record-granular, which is why this reserializes the remainder
+    /// instead of dropping whole lines: a record is one HTTP request and a batch is
+    /// `MAX_INSERT_BATCH_EVENTS` rows, and those are independent limits. Whenever the batch
+    /// boundary falls mid-record — the common case once a backlog builds — the record is split, and
+    /// the untouched tail is written back. Acking whole records instead would stall permanently on
+    /// any request larger than the insert batch.
     pub fn ack_prefix(&self, count: usize) -> Result<(), String> {
         if count == 0 {
             return Ok(());
@@ -186,15 +193,12 @@ impl Wal {
 
 /// Takes a non-blocking exclusive `flock` and returns the handle that owns it.
 ///
-/// Two processes on one WAL path corrupt it silently rather than loudly: `append` writes the record
-/// and its newline as separate syscalls, so interleaved batches produce an undecodable line, and
-/// `ack_prefix` rewrites the whole file, so a concurrent append is discarded *after* its 200 was
-/// returned. Refusing to start is the only safe response, and it turns a deployment mistake into a
-/// visible one.
+/// Sharing a WAL path silently drops already-acknowledged events, so refusing to start is the only
+/// safe response; `docs/architecture.md` has the failure modes.
 ///
-/// The lock lives on a sidecar file because `ack_prefix` renames a replacement over the WAL path —
-/// the log's own inode is not a stable identity, so a second process would open the replacement and
-/// lock it successfully. The sidecar is only ever created, never replaced.
+/// The lock lives on a sidecar because `ack_prefix` renames a replacement over the WAL path — the
+/// log's inode changes on every flush, so a second process would open the new one and lock it
+/// successfully. The sidecar is only ever created, never replaced.
 fn lock_exclusive(path: &Path) -> Result<File, String> {
     let file = OpenOptions::new()
         .create(true)
@@ -273,6 +277,22 @@ mod tests {
         assert_eq!(wal.read_prefix(2).unwrap().len(), 2);
         wal.ack_prefix(2).unwrap();
         assert_eq!(wal.read_prefix(10).unwrap(), vec![row(3)]);
+
+        cleanup(&path);
+    }
+
+    /// The insert batch size and the per-request size are independent, so a batch boundary lands
+    /// inside a record as soon as a backlog builds. The record's tail must survive the ack.
+    #[test]
+    fn ack_splits_a_record_when_the_batch_boundary_falls_mid_request() {
+        let path = path();
+        let wal = Wal::open(&path).unwrap();
+        wal.append(&[row(1), row(2), row(3)]).unwrap();
+        wal.append(&[row(4)]).unwrap();
+
+        assert_eq!(wal.read_prefix(2).unwrap(), vec![row(1), row(2)]);
+        wal.ack_prefix(2).unwrap();
+        assert_eq!(wal.read_all().unwrap(), vec![row(3), row(4)]);
 
         cleanup(&path);
     }

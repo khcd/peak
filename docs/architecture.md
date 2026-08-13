@@ -119,6 +119,12 @@ Known sharp edges in this path, all currently accepted:
   write the remainder to a fixed `<path>.wal.tmp`, `fs::rename`. So each flush is O(pending), which
   goes quadratic under a large backlog, i.e. exactly when ClickHouse is slow. It also compacts all
   remaining records into a single line.
+- **Acking is row-granular, not record-granular.** A record is one HTTP request (up to
+  `MAX_BATCH_EVENTS`) and a batch is `MAX_INSERT_BATCH_EVENTS` rows; the two limits are independent,
+  so once a backlog builds the batch boundary routinely falls mid-record and `read_prefix`
+  truncates one. That is why the ack cannot just drop whole lines, and it is the reason for the JSON
+  round-trip above. Switching to record granularity would be cheaper but would stall permanently on
+  any request larger than the insert batch — a config combination nothing currently forbids.
 - **A malformed WAL is a hard failure, by design.** `Wal::open` calls `read_all()` before the
   listener binds and `main` exits 2. Keeping the file untouched makes it operator-recoverable
   instead of silently dropping an accepted event.

@@ -16,7 +16,9 @@ a dependency-free ingest-key generator (`keygen <tenant>`), dispatched in `src/m
 
 | Path | Role |
 |---|---|
-| `src/main.rs` | axum router, `/healthz`, `/v2/events`, the single write path `insert_rows` |
+| `src/main.rs` | axum router, `/healthz`, `/v2/events`, and durable enqueueing |
+| `src/batcher.rs` | fsynced WAL enqueue, size/time batching, ClickHouse insert, startup recovery |
+| `src/wal.rs` | append-only JSON-lines WAL and crash-safe prefix compaction |
 | `src/cli.rs` | dependency-free parser for `serve`, `dashboard`, and `keygen` |
 | `src/event.rs` | `IncomingEvent` (wire) → `EventRow` (storage row) plus envelope validation |
 | `src/contract.rs` | Validates `attributes` against the tenant manifest |
@@ -135,6 +137,14 @@ there is no admin API, key store, or revocation without restart.
   into maps **loses column order**. `JSONCompactEachRowWithNamesAndTypes` preserves it.
 - Explicit `toUInt32`/`toUInt64` casts in the read SQL are required for RowBinary type matching
   against the row structs — they are not cosmetic.
-- Writes never build SQL: `insert_rows` uses `client.insert("events")` with
-  `async_insert=1` + `wait_for_async_insert=1`, so a 200 means ClickHouse acknowledged. There are
-  no transactions; a batch is not atomic.
+- Accepted events are first appended to the JSON-lines WAL and fsynced. A background writer combines
+  records up to `MAX_INSERT_BATCH_EVENTS` or until `BATCH_WAIT_MS` elapses (5 seconds by default),
+  then uses `client.insert("events")` with `async_insert=1` + `wait_for_async_insert=1`. Thus a 200
+  means the service has durably queued the event, not that ClickHouse has already received it.
+- On cold start, pending WAL rows are queried by `event_id` and compared against the full stored row.
+  Exact matches are removed from the WAL; missing or mismatched rows are replayed. The ClickHouse
+  insert happens before WAL compaction, so a crash in between causes a duplicate replay rather than
+  data loss. `ReplacingMergeTree(received_at)` plus the dashboard's `uniqExact(event_id)` handles
+  that duplicate safely.
+- There are no transactions; a ClickHouse batch is not atomic. Rows remain in the WAL until the
+  successful insert has been observed and the WAL rewrite completes.

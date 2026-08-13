@@ -1,4 +1,8 @@
-use std::{env, fs, net::SocketAddr, path::Path};
+use std::{
+    env, fs,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 use clickhouse::Client;
 use serde::Deserialize;
@@ -14,10 +18,13 @@ pub struct Config {
     pub clickhouse: ClickhouseConfig,
     pub ingest_keys: String,
     pub max_batch_events: usize,
+    pub max_insert_batch_events: usize,
+    pub batch_wait_ms: u64,
     pub max_body_bytes: usize,
     pub limits: Limits,
     pub trust_cloudflare_headers: bool,
     pub ingest_version: String,
+    pub wal_path: PathBuf,
 }
 
 pub struct ClickhouseConfig {
@@ -72,6 +79,8 @@ impl Config {
             clickhouse: ClickhouseConfig::from_env()?,
             ingest_keys: required_env("INGEST_KEYS")?,
             max_batch_events: positive_env("MAX_BATCH_EVENTS", 200)?,
+            max_insert_batch_events: positive_env("MAX_INSERT_BATCH_EVENTS", 200)?,
+            batch_wait_ms: positive_u64_env("BATCH_WAIT_MS", 5_000)?,
             max_body_bytes: positive_env("MAX_BODY_BYTES", 1_048_576)?,
             limits: Limits {
                 max_attributes_bytes: positive_env("MAX_ATTRIBUTES_BYTES", 16_384)?,
@@ -80,6 +89,7 @@ impl Config {
             },
             trust_cloudflare_headers: bool_env("TRUST_CLOUDFLARE_HEADERS", false)?,
             ingest_version: env_or("INGEST_VERSION", env!("CARGO_PKG_VERSION")),
+            wal_path: PathBuf::from(env_or("WAL_PATH", "data/events.wal")),
         })
     }
 }
@@ -150,6 +160,14 @@ pub fn positive_i64_env(name: &str, default: i64) -> Result<i64, String> {
         .filter(|value| *value > 0)
         .ok_or_else(|| format!("{name} must be a positive integer"))
 }
+pub fn positive_u64_env(name: &str, default: u64) -> Result<u64, String> {
+    env::var(name)
+        .ok()
+        .map_or(Ok(default), |value| value.parse::<u64>())
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| format!("{name} must be a positive integer"))
+}
 pub fn bool_env(name: &str, default: bool) -> Result<bool, String> {
     env::var(name).ok().map_or(Ok(default), |value| {
         value
@@ -160,7 +178,7 @@ pub fn bool_env(name: &str, default: bool) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileConfig, TransportCompression};
+    use super::{FileConfig, TransportCompression, positive_u64_env};
 
     #[test]
     fn parses_clickhouse_transport_compression() {
@@ -187,5 +205,13 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("unexpected"));
+    }
+
+    #[test]
+    fn positive_u64_helper_keeps_the_flush_interval_nonzero() {
+        assert_eq!(
+            positive_u64_env("MISSING_BATCH_WAIT_TEST", 5_000).unwrap(),
+            5_000
+        );
     }
 }

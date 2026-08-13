@@ -33,7 +33,7 @@ to the Cargo package version and can be overridden for a deployment.
 ]
 ```
 
-The producer is derived from `Authorization: Bearer <secret>`. The service accepts only reviewed `(producer, event_name, schema_version)` contracts and declared `attributes`. It returns `200` with `{ "accepted": N, "rejected": [...] }`; accepted events are durable.
+The producer is derived from `Authorization: Bearer <secret>`. The service accepts only reviewed `(producer, event_name, schema_version)` contracts and declared `attributes`. It returns `200` with `{ "accepted": N, "rejected": [...] }`; accepted events are fsynced to the server WAL before the response. ClickHouse insertion happens asynchronously, so an accepted event may take a few seconds to appear in the dashboard.
 
 `/v2/events` accepts uncompressed JSON plus `Content-Encoding: gzip` or `Content-Encoding: zstd`.
 Clients should compress batches before sending them; the service bounds both the encoded and
@@ -150,8 +150,9 @@ docker compose logs -f handler
 docker compose down
 ```
 
-ClickHouse data is kept in the `clickhouse-data` Docker volume. The initial schema is applied only
-when that volume is first created.
+ClickHouse data is kept in the `clickhouse-data` Docker volume, and pending accepted telemetry is
+kept in the `handler-data` volume until ClickHouse acknowledges it. The initial schema is applied
+only when the ClickHouse volume is first created.
 
 ## Service settings
 
@@ -163,6 +164,17 @@ different file; it defaults to `config.json`. The supplied Docker image includes
 `clickhouse.transport_compression` controls the ClickHouse client connection: `lz4` uses native LZ4
 transport blocks (the default), while `none` disables them. This affects only traffic between the
 service and ClickHouse; MergeTree storage compression is configured independently by ClickHouse.
+
+The ingest path appends accepted rows to a JSON-lines WAL before returning `200`, then combines
+requests into ClickHouse inserts. `MAX_INSERT_BATCH_EVENTS` controls the size of those inserts;
+`BATCH_WAIT_MS` defaults to 5000, so low-volume producers are flushed after five seconds even when
+they never fill a batch. Smaller values reduce latency but increase ClickHouse insert frequency.
+`WAL_PATH` defaults to `data/events.wal`; the Compose deployment uses the durable `handler-data`
+volume. On startup, pending WAL rows are checked against ClickHouse by full row content. Matching
+rows are acknowledged without another insert, missing rows are replayed, and event-ID content
+mismatches are logged and replayed from the WAL. A crash between ClickHouse acknowledgement and
+WAL compaction can therefore produce a duplicate physical row, but the table's
+`ReplacingMergeTree`/`uniqExact(event_id)` design makes that replay safe.
 
 Recreate the disposable local table:
 

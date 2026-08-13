@@ -4,6 +4,7 @@ use crate::manifest::{Registry, Tenant};
 pub enum Mode {
     Serve,
     Dashboard { tenant: &'static Tenant },
+    Keygen { tenant: &'static Tenant },
 }
 
 impl Mode {
@@ -38,12 +39,26 @@ fn parse(
             })?;
             Ok(Mode::Dashboard { tenant })
         }
+        [command, tenant] if command == "keygen" => {
+            let tenant = registry.get(tenant).ok_or_else(|| {
+                format!(
+                    "unknown tenant '{tenant}'; known tenants: {}\n{}",
+                    registry
+                        .iter()
+                        .map(|tenant| tenant.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    usage()
+                )
+            })?;
+            Ok(Mode::Keygen { tenant })
+        }
         _ => Err(usage()),
     }
 }
 
 fn usage() -> String {
-    "usage: telemetry-ingest [dashboard [tenant]]".into()
+    "usage: peak [dashboard [tenant] | keygen <tenant>]".into()
 }
 
 #[cfg(test)]
@@ -75,6 +90,20 @@ mod tests {
     }
 
     #[test]
+    fn keygen_resolves_producer() {
+        let tenant_name = registry().first().unwrap().name.clone();
+        let mode = parse(["keygen".into(), tenant_name.clone()], registry()).unwrap();
+        assert!(matches!(mode, Mode::Keygen { tenant } if tenant.name == tenant_name));
+    }
+
+    #[test]
+    fn invalid_keygen_producer_lists_choices() {
+        let error = parse(["keygen".into(), "nope".into()], registry()).unwrap_err();
+        assert!(error.contains("nope"));
+        assert!(error.contains(&registry().first().unwrap().name));
+    }
+
+    #[test]
     fn rejects_bad_argument_shapes() {
         assert!(matches!(
             parse(["dashboard".into()], registry()),
@@ -88,5 +117,8 @@ mod tests {
             )
             .is_err()
         );
+        assert!(parse(["keygen".into()], registry()).is_err());
+        let tenant_name = registry().first().unwrap().name.clone();
+        assert!(parse(["keygen".into(), tenant_name, "extra".into()], registry()).is_err());
     }
 }

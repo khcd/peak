@@ -75,6 +75,11 @@ async fn main() {
     }) {
         cli::Mode::Serve => serve(registry).await,
         cli::Mode::Dashboard { tenant } => dashboard::run(registry, tenant).await,
+        cli::Mode::Keygen { tenant } => {
+            let secret = auth::generate_secret();
+            println!("{}:{secret}", tenant.name);
+            eprintln!("append this entry to INGEST_KEYS and restart the service");
+        }
     }
 }
 

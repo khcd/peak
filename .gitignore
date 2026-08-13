@@ -7,6 +7,10 @@
 # Local environment and secrets
 .env.*
 !.env.example
+.claude/
+
+# Agent tooling. The public architecture guide is docs/architecture.md.
+CLAUDE.md
 
 # Editor and operating-system files
 .DS_Store

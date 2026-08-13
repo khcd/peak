@@ -24,15 +24,16 @@ ping_interval_minutes = 5
 [events.live_ping]
 
 # Scalar field types: bool, u64, i64, f64, str, and enum.
-[events.generation_requested.fields]
-backend = { type = "enum", values = ["sdcpp", "diffusers"], required = true }
+[events.job_started.fields]
+engine = { type = "enum", values = ["local", "remote"], required = true }
 model = { type = "str", max_bytes = 256, required = true }
-steps = { type = "u64", required = true }
-guidance = { type = "f64" }
-success = { type = "bool" }
+iterations = { type = "u64", required = true }
+output_width = { type = "u64", required = true }
+output_height = { type = "u64", required = true }
+scheduler = { type = "str", max_bytes = 128, required = true }
 
 # Nullable fields accept null; required fields must be present.
-[events.generation_completed.fields]
+[events.job_finished.fields]
 duration_ms = { type = "u64", required = true }
 error_kind = { type = "enum", values = ["oom", "model_load", "other"], nullable = true }
 

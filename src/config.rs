@@ -20,6 +20,7 @@ pub struct Config {
     pub max_batch_events: usize,
     pub max_insert_batch_events: usize,
     pub batch_wait_ms: u64,
+    pub shutdown_drain_ms: u64,
     pub max_body_bytes: usize,
     pub limits: Limits,
     pub trust_cloudflare_headers: bool,
@@ -81,6 +82,10 @@ impl Config {
             max_batch_events: positive_env("MAX_BATCH_EVENTS", 200)?,
             max_insert_batch_events: positive_env("MAX_INSERT_BATCH_EVENTS", 200)?,
             batch_wait_ms: positive_u64_env("BATCH_WAIT_MS", 5_000)?,
+            // Must stay below the orchestrator's kill deadline, or the drain is cut short by
+            // SIGKILL and the WAL is left for the next start instead. Docker's default
+            // `stop_grace_period` is 10s, so `docker-compose.yml` raises it to match this.
+            shutdown_drain_ms: positive_u64_env("SHUTDOWN_DRAIN_MS", 25_000)?,
             max_body_bytes: positive_env("MAX_BODY_BYTES", 1_048_576)?,
             limits: Limits {
                 max_attributes_bytes: positive_env("MAX_ATTRIBUTES_BYTES", 16_384)?,
@@ -136,6 +141,12 @@ fn config_path() -> String {
 /// default, matching how `occurred_at` is stored and how the table is partitioned.
 pub fn dashboard_timezone() -> String {
     env_or("DASHBOARD_TIMEZONE", "UTC")
+}
+
+/// The dashboard is a separate CLI process, so it reads the handler's in-memory/WAL backlog from
+/// this small HTTP status endpoint rather than pretending ClickHouse can expose it.
+pub fn ingest_health_url() -> String {
+    env_or("INGEST_HEALTH_URL", "http://127.0.0.1:8081/healthz")
 }
 
 pub fn required_env(name: &str) -> Result<String, String> {

@@ -1,7 +1,7 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
@@ -16,9 +16,14 @@ struct WalRecord {
 /// A small JSON-lines write-ahead log. Each line is a complete accepted HTTP batch, so a single
 /// fsync covers all of the events returned in that response. The log is rewritten only after the
 /// corresponding ClickHouse insert succeeds; a crash before that rewrite replays safely.
+///
+/// Exactly one process may own a given path; see `lock_exclusive`.
 #[derive(Debug)]
 pub struct Wal {
     path: PathBuf,
+    /// Owns the `flock` for as long as the log is in use. Dropping the `Wal` closes it and
+    /// releases the lock.
+    _lock: File,
 }
 
 impl Wal {
@@ -40,7 +45,8 @@ impl Wal {
             .append(true)
             .open(&path)
             .map_err(|error| format!("could not open WAL {}: {error}", path.display()))?;
-        let wal = Self { path };
+        let lock = lock_exclusive(&path.with_extension("wal.lock"))?;
+        let wal = Self { path, _lock: lock };
         // Fail before binding the HTTP listener if a crash left a malformed record. Keeping the
         // file untouched makes the failure recoverable by an operator instead of silently losing
         // an accepted event or accepting new rows behind an unreadable prefix.
@@ -178,6 +184,44 @@ impl Wal {
     }
 }
 
+/// Takes a non-blocking exclusive `flock` and returns the handle that owns it.
+///
+/// Two processes on one WAL path corrupt it silently rather than loudly: `append` writes the record
+/// and its newline as separate syscalls, so interleaved batches produce an undecodable line, and
+/// `ack_prefix` rewrites the whole file, so a concurrent append is discarded *after* its 200 was
+/// returned. Refusing to start is the only safe response, and it turns a deployment mistake into a
+/// visible one.
+///
+/// The lock lives on a sidecar file because `ack_prefix` renames a replacement over the WAL path —
+/// the log's own inode is not a stable identity, so a second process would open the replacement and
+/// lock it successfully. The sidecar is only ever created, never replaced.
+fn lock_exclusive(path: &Path) -> Result<File, String> {
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|error| format!("could not open WAL lock {}: {error}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: `file` owns the descriptor and stays alive for the duration of the call.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = std::io::Error::last_os_error();
+            return Err(if error.kind() == std::io::ErrorKind::WouldBlock {
+                format!(
+                    "another process already holds the WAL lock {}; every instance needs its own WAL_PATH",
+                    path.display()
+                )
+            } else {
+                format!("could not lock WAL {}: {error}", path.display())
+            });
+        }
+    }
+    Ok(file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::Wal;
@@ -214,6 +258,11 @@ mod tests {
         ))
     }
 
+    fn cleanup(path: &PathBuf) {
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(path.with_extension("wal.lock"));
+    }
+
     #[test]
     fn append_round_trips_and_ack_compacts_only_the_prefix() {
         let path = path();
@@ -225,6 +274,25 @@ mod tests {
         wal.ack_prefix(2).unwrap();
         assert_eq!(wal.read_prefix(10).unwrap(), vec![row(3)]);
 
-        fs::remove_file(path).unwrap();
+        cleanup(&path);
+    }
+
+    /// `flock` is held per open file description, so a second `open` conflicts even in-process.
+    #[cfg(unix)]
+    #[test]
+    fn open_refuses_a_second_owner_and_releases_on_drop() {
+        let path = path();
+        let held = Wal::open(&path).unwrap();
+
+        let error = Wal::open(&path).unwrap_err();
+        assert!(
+            error.contains("another process already holds the WAL lock"),
+            "{error}"
+        );
+
+        drop(held);
+        Wal::open(&path).expect("the lock is released once the owner is dropped");
+
+        cleanup(&path);
     }
 }

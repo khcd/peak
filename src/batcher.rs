@@ -1,11 +1,12 @@
 use std::{
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use clickhouse::Client;
-use tokio::{sync::Notify, time};
-use tracing::{debug, error, warn};
+use tokio::{sync::Notify, task::JoinHandle, time};
+use tracing::{debug, error, info, warn};
 
 use crate::{event::EventRow, wal::Wal};
 
@@ -19,6 +20,8 @@ pub struct BatchWriter {
     max_events: usize,
     wait: Duration,
     notify: Arc<Notify>,
+    pending_events: Arc<AtomicUsize>,
+    draining: Arc<AtomicBool>,
 }
 
 impl BatchWriter {
@@ -31,18 +34,49 @@ impl BatchWriter {
         if max_events == 0 {
             return Err("MAX_INSERT_BATCH_EVENTS must be positive".into());
         }
+        let wal = Wal::open(wal_path)?;
+        let pending_events = wal.read_all()?.len();
         Ok(Arc::new(Self {
             clickhouse,
-            wal: Arc::new(Mutex::new(Wal::open(wal_path)?)),
+            wal: Arc::new(Mutex::new(wal)),
             max_events,
             wait,
             notify: Arc::new(Notify::new()),
+            pending_events: Arc::new(AtomicUsize::new(pending_events)),
+            draining: Arc::new(AtomicBool::new(false)),
         }))
     }
 
-    pub fn start(self: &Arc<Self>) {
+    /// The returned handle must be passed to `drain` at shutdown; dropping it detaches the worker
+    /// and abandons whatever is still in the WAL.
+    #[must_use]
+    pub fn start(self: &Arc<Self>) -> JoinHandle<()> {
         let writer = Arc::clone(self);
-        tokio::spawn(async move { writer.run().await });
+        tokio::spawn(async move { writer.run().await })
+    }
+
+    /// Flushes everything already accepted, then lets the worker exit.
+    ///
+    /// Call this only after the HTTP server has finished its own graceful shutdown, so that no
+    /// further events can be enqueued while the WAL is being emptied. Rows still pending when
+    /// `limit` expires stay durable on disk and replay on the next start of a process configured
+    /// with the same `WAL_PATH` — which is why that path has to be persistent storage.
+    pub async fn drain(&self, worker: JoinHandle<()>, limit: Duration) {
+        self.draining.store(true, Ordering::Release);
+        // `notify_one` stores a permit if the worker has not parked yet, so this cannot race with
+        // the worker's own emptiness check.
+        self.notify.notify_one();
+        match time::timeout(limit, worker).await {
+            Ok(Ok(())) => info!("drained the telemetry WAL"),
+            Ok(Err(error)) => {
+                error!(%error, "telemetry writer stopped before the WAL was drained");
+            }
+            Err(_) => warn!(
+                pending_events = self.pending_events(),
+                timeout_ms = limit.as_millis() as u64,
+                "timed out draining the telemetry WAL; pending rows replay on the next start"
+            ),
+        }
     }
 
     /// Appending and fsyncing happens before the HTTP handler reports acceptance. ClickHouse is
@@ -51,6 +85,7 @@ impl BatchWriter {
         if rows.is_empty() {
             return Ok(());
         }
+        let count = rows.len();
         let wal = Arc::clone(&self.wal);
         tokio::task::spawn_blocking(move || {
             let wal = wal
@@ -60,8 +95,17 @@ impl BatchWriter {
         })
         .await
         .map_err(|error| format!("WAL append task failed: {error}"))??;
+        self.pending_events.fetch_add(count, Ordering::Relaxed);
         self.notify.notify_one();
         Ok(())
+    }
+
+    pub fn pending_events(&self) -> usize {
+        self.pending_events.load(Ordering::Relaxed)
+    }
+
+    pub fn batch_capacity(&self) -> usize {
+        self.max_events
     }
 
     #[cfg(test)]
@@ -93,11 +137,19 @@ impl BatchWriter {
             if rows.is_empty() {
                 recovering = false;
                 first_pending_at = None;
+                // An empty WAL is the only safe exit point: everything accepted has been observed
+                // by ClickHouse and acknowledged.
+                if self.draining.load(Ordering::Acquire) {
+                    return;
+                }
                 self.notify.notified().await;
                 continue;
             }
 
-            if !recovering && rows.len() < self.max_events {
+            // A drain flushes whatever is already accepted immediately — waiting out the batch
+            // window would only delay the exit, and the caller's timeout is the real budget.
+            let draining = self.draining.load(Ordering::Acquire);
+            if !recovering && !draining && rows.len() < self.max_events {
                 let pending_at = first_pending_at.get_or_insert_with(Instant::now);
                 let remaining = self.wait.saturating_sub(pending_at.elapsed());
                 tokio::select! {
@@ -166,7 +218,9 @@ impl BatchWriter {
             wal.ack_prefix(count)
         })
         .await
-        .map_err(|error| format!("WAL acknowledgement task failed: {error}"))?
+        .map_err(|error| format!("WAL acknowledgement task failed: {error}"))??;
+        self.pending_events.fetch_sub(count, Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -240,6 +294,11 @@ mod tests {
         ))
     }
 
+    fn cleanup(path: &PathBuf) {
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(path.with_extension("wal.lock"));
+    }
+
     fn row(id: u128) -> EventRow {
         EventRow {
             event_id: Uuid::from_u128(id),
@@ -270,9 +329,38 @@ mod tests {
             Duration::from_secs(5),
         )
         .unwrap();
+        assert_eq!(writer.pending_events(), 0);
         writer.enqueue(vec![row(1)]).await.unwrap();
+        assert_eq!(writer.pending_events(), 1);
         assert_eq!(writer.pending_rows().await.unwrap(), vec![row(1)]);
-        fs::remove_file(path).unwrap();
+        cleanup(&path);
+    }
+
+    /// An empty WAL is the worker's exit point, so this covers the drain handshake without needing
+    /// a ClickHouse to insert into. Returning well inside the limit is the assertion — a hung
+    /// worker would burn the whole timeout instead.
+    #[tokio::test]
+    async fn drain_stops_the_worker_once_the_wal_is_empty() {
+        let path = path();
+        let writer = BatchWriter::new(
+            clickhouse::Client::default(),
+            &path,
+            100,
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let worker = writer.start();
+
+        let started = std::time::Instant::now();
+        writer.drain(worker, Duration::from_secs(10)).await;
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "drain should exit on the first empty read, took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(writer.pending_events(), 0);
+        cleanup(&path);
     }
 
     #[test]

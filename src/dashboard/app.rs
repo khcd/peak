@@ -8,6 +8,12 @@ use crate::manifest::Tenant;
 
 const TAIL_CAPACITY: usize = 200;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IngestHealth {
+    pub pending_events: usize,
+    pub batch_capacity: usize,
+}
+
 pub struct App {
     pub tenant: &'static Tenant,
     /// Reporting timezone every calendar-day window resolves in. Shown in the header so a figure
@@ -29,6 +35,9 @@ pub struct App {
     pub slow_ok: Option<OffsetDateTime>,
     pub fast_error: Option<String>,
     pub slow_error: Option<String>,
+    pub pending_events: Option<usize>,
+    pub pending_capacity: usize,
+    pub ingest_health_error: Option<String>,
 }
 
 impl Default for App {
@@ -59,6 +68,9 @@ impl App {
             slow_ok: None,
             fast_error: None,
             slow_error: None,
+            pending_events: None,
+            pending_capacity: 200,
+            ingest_health_error: None,
         }
     }
 
@@ -103,6 +115,20 @@ impl App {
         self.fleet = fleet;
         self.slow_ok = Some(OffsetDateTime::now_utc());
         self.slow_error = None;
+    }
+
+    pub fn apply_ingest_health(&mut self, result: Result<IngestHealth, String>) {
+        match result {
+            Ok(health) => {
+                self.pending_events = Some(health.pending_events);
+                self.pending_capacity = health.batch_capacity.max(1);
+                self.ingest_health_error = None;
+            }
+            Err(error) => {
+                self.pending_events = None;
+                self.ingest_health_error = Some(error);
+            }
+        }
     }
 
     pub fn insert_tail(&mut self, rows: Vec<TailRow>) {
@@ -222,5 +248,24 @@ mod tests {
         assert_eq!(app.tail.len(), TAIL_CAPACITY);
         assert_eq!(app.tail_ids.len(), TAIL_CAPACITY);
         assert!(!app.tail_ids.contains(&Uuid::from_u128(0)));
+    }
+
+    #[test]
+    fn ingest_health_updates_pending_gauge_and_unknown_state() {
+        let mut app = App::default();
+        app.apply_ingest_health(Ok(IngestHealth {
+            pending_events: 12,
+            batch_capacity: 200,
+        }));
+        assert_eq!(app.pending_events, Some(12));
+        assert_eq!(app.pending_capacity, 200);
+        assert!(app.ingest_health_error.is_none());
+
+        app.apply_ingest_health(Err("handler unavailable".into()));
+        assert_eq!(app.pending_events, None);
+        assert_eq!(
+            app.ingest_health_error.as_deref(),
+            Some("handler unavailable")
+        );
     }
 }

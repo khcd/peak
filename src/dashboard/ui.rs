@@ -6,8 +6,8 @@ use ratatui::{
     style::{Color, Style},
     symbols::Marker,
     widgets::{
-        Axis, Block, Borders, Chart, Dataset, GraphType, List, ListItem, Paragraph, Row, Table,
-        Widget,
+        Axis, Block, Borders, Chart, Dataset, Gauge, GraphType, List, ListItem, Paragraph, Row,
+        Table, Widget,
     },
 };
 use time::OffsetDateTime;
@@ -20,7 +20,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(7),
-            Constraint::Length(4),
+            Constraint::Length(9),
             Constraint::Length(8),
             Constraint::Min(4),
             Constraint::Length(1),
@@ -28,6 +28,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .split(area);
     draw_stats(frame, sections[0], app);
     let peak = app.buckets.iter().copied().max().unwrap_or(0);
+    let y_max = chart_scale(peak);
+    let y_mid = y_max / 2;
     let points = app
         .buckets
         .iter()
@@ -41,13 +43,21 @@ pub fn draw(frame: &mut Frame, app: &App) {
             .marker(Marker::Braille)
             .style(Style::default().fg(Color::Cyan)),
     ])
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!("incoming · events/sec · last 60s · peak {peak}")),
+    .block(Block::default().borders(Borders::ALL).title(format!(
+        "incoming · events/sec · last 60s · peak {peak} · scale 0–{y_max}"
+    )))
+    .x_axis(
+        Axis::default()
+            .title("time")
+            .bounds([0.0, 59.0])
+            .labels(["60s ago", "30s ago", "now"]),
     )
-    .x_axis(Axis::default().bounds([0.0, 59.0]))
-    .y_axis(Axis::default().bounds([0.0, peak.max(1) as f64]))
+    .y_axis(
+        Axis::default()
+            .title("events/s")
+            .bounds([0.0, y_max as f64])
+            .labels(vec!["0".to_owned(), number(y_mid), number(y_max)]),
+    )
     .render(sections[1], frame.buffer_mut());
 
     let lower = Layout::default()
@@ -117,7 +127,7 @@ fn draw_stats(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         .block(Block::default().borders(Borders::TOP | Borders::BOTTOM))
         .render(columns[1], frame.buffer_mut());
     let connected = format!(
-        "CONNECTED\n now   {:>8}\n\n ping <{}m",
+        "CONNECTED\n count: {}\n ping: <{}m",
         app.connected.map(number).unwrap_or_else(|| "--".into()),
         app.tenant
             .dashboard
@@ -125,9 +135,58 @@ fn draw_stats(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
             .map(|n| n.to_string())
             .unwrap_or_else(|| "--".into())
     );
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(3)])
+        .split(columns[2]);
     Paragraph::new(connected)
-        .block(Block::default().borders(Borders::RIGHT | Borders::TOP | Borders::BOTTOM))
-        .render(columns[2], frame.buffer_mut());
+        .block(Block::default().borders(Borders::RIGHT | Borders::TOP))
+        .render(right[0], frame.buffer_mut());
+    draw_pending(frame, right[1], app);
+}
+
+fn draw_pending(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+    let Some(pending) = app.pending_events else {
+        Paragraph::new("unknown\nhandler status unavailable")
+            .block(
+                Block::default()
+                    .borders(Borders::RIGHT | Borders::BOTTOM)
+                    .title("UNFLUSHED"),
+            )
+            .render(area, frame.buffer_mut());
+        return;
+    };
+    let capacity = app.pending_capacity.max(1);
+    let ratio = (pending as f64 / capacity as f64).min(1.0);
+    Gauge::default()
+        .block(
+            Block::default()
+                .borders(Borders::RIGHT | Borders::BOTTOM)
+                .title("UNFLUSHED"),
+        )
+        .gauge_style(Style::default().fg(if pending == 0 {
+            Color::Green
+        } else {
+            Color::Yellow
+        }))
+        .ratio(ratio)
+        .label(format!("{} queued", number(pending as u64)))
+        .render(area, frame.buffer_mut());
+}
+
+fn chart_scale(peak: u64) -> u64 {
+    let target = peak.max(5);
+    let mut magnitude = 1;
+    while target / magnitude >= 10 {
+        magnitude *= 10;
+    }
+    for factor in [1, 2, 5, 10] {
+        let scale = magnitude * factor;
+        if scale >= target {
+            return scale;
+        }
+    }
+    magnitude * 10
 }
 
 fn draw_events(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
@@ -226,4 +285,19 @@ fn bar(value: u64, top: u64, width: usize) -> String {
 
 fn percent(value: u64, total: u64) -> u64 {
     if total == 0 { 0 } else { value * 100 / total }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chart_scale;
+
+    #[test]
+    fn chart_scale_stays_zoomed_for_low_traffic_and_expands_for_spikes() {
+        assert_eq!(chart_scale(0), 5);
+        assert_eq!(chart_scale(5), 5);
+        assert_eq!(chart_scale(6), 10);
+        assert_eq!(chart_scale(42), 50);
+        assert_eq!(chart_scale(200), 200);
+        assert_eq!(chart_scale(201), 500);
+    }
 }

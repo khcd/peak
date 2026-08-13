@@ -104,10 +104,10 @@ async fn serve(registry: &'static manifest::Registry) {
         error!(%message, path = %config.wal_path.display(), "could not initialize telemetry WAL");
         std::process::exit(2);
     });
-    writer.start();
+    let writer_task = writer.start();
     let state = AppState {
         clickhouse,
-        writer,
+        writer: Arc::clone(&writer),
         producers: Arc::new(producers),
         limits: Arc::new(config.limits),
         max_batch_events: config.max_batch_events,
@@ -126,6 +126,12 @@ async fn serve(registry: &'static manifest::Registry) {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server error");
+    // `serve` returns once in-flight requests have finished, so nothing can enqueue past this
+    // point and the WAL backlog is a fixed set. Flushing it here is what makes ephemeral storage
+    // survivable; without it the process exits owning up to a full batch plus a batch window.
+    writer
+        .drain(writer_task, Duration::from_millis(config.shutdown_drain_ms))
+        .await;
 }
 
 fn router(state: AppState, max_body_bytes: usize) -> Router {
@@ -158,7 +164,11 @@ async fn healthz(State(state): State<AppState>) -> Result<Json<Value>, ApiError>
     )
     .await;
     match result {
-        Ok(Ok(row)) if row.value == 1 => Ok(Json(serde_json::json!({ "ok": true }))),
+        Ok(Ok(row)) if row.value == 1 => Ok(Json(serde_json::json!({
+            "ok": true,
+            "pending_events": state.writer.pending_events(),
+            "batch_capacity": state.writer.batch_capacity(),
+        }))),
         Ok(Ok(_)) => {
             error!("unexpected ClickHouse health result");
             Err(ApiError::unavailable())
@@ -279,13 +289,21 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
+    /// Each state gets its own WAL: `Wal::open` takes an exclusive lock, and tests run in parallel
+    /// threads of one process.
+    fn test_wal_path() -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!("peak-main-test-{}-{seq}.wal", std::process::id()))
+    }
+
     fn state() -> AppState {
         let tenant_name = registry().first().unwrap().name.clone();
         AppState {
             clickhouse: Client::default(),
             writer: BatchWriter::new(
                 Client::default(),
-                std::env::temp_dir().join(format!("peak-main-test-{}.wal", std::process::id())),
+                test_wal_path(),
                 200,
                 Duration::from_secs(5),
             )

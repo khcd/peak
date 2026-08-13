@@ -2,12 +2,9 @@
 
 Authenticated, versioned multi-tenant telemetry ingestion backed by ClickHouse.
 
-## Versioning
+## Why 
 
-`peak` follows [Semantic Versioning 2.0.0](https://semver.org/). The initial release is `0.1.0`
-(the `0.1` development line); while the major version is zero, minor releases may still include
-breaking changes and patch releases are reserved for compatible fixes. `INGEST_VERSION` defaults
-to the Cargo package version and can be overridden for a deployment.
+What are all my projects across web and local installs doing right now? From a terminal, without requiring Grafana, a browser, or any other heavyweight observability stack.  
 
 ## Contract
 
@@ -73,17 +70,17 @@ hex secret. It needs neither ClickHouse nor an existing ingest key, so it is the
 on a fresh checkout:
 
 ```sh
-cargo run -- keygen demo
+cargo run -- keygen planar
 ```
 
-The `demo:<secret>` pair goes to stdout and the restart hint to stderr, so the pair can be
+The `planar:<secret>` pair goes to stdout and the restart hint to stderr, so the pair can be
 redirected straight into a file. Restart the service after updating `INGEST_KEYS`.
 
 Without a Rust toolchain, any 64 hex characters work — the format is chosen so that it clears the
 16-byte minimum and contains neither of the `,` and `:` characters `INGEST_KEYS` is split on:
 
 ```sh
-printf 'demo:%s\n' "$(openssl rand -hex 32)"
+printf 'planar:%s\n' "$(openssl rand -hex 32)"
 ```
 
 Once the stack is already running, a key for an *additional* tenant can be generated in the
@@ -115,14 +112,14 @@ optional Caddy reverse proxy:
 
 ```sh
 cp .env.example .env
-cargo run -- keygen demo
+cargo run -- keygen planar
 ```
 
 Then edit `.env`. Compose interpolates the whole file before it starts anything, so all three of
 these must have real values or every `docker compose` command fails with
 `required variable ... is missing a value`:
 
-- `INGEST_KEYS` — the generated `demo:<secret>` pair, replacing `CHANGE_ME`.
+- `INGEST_KEYS` — the generated `planar:<secret>` pair, replacing `CHANGE_ME`.
 - `CLICKHOUSE_PASSWORD` — replacing `CHANGE_ME`.
 - `TELEMETRY_DOMAIN` — `localhost` for a local-only run, or the DNS name pointing at this host for
   a public deployment.
@@ -176,6 +173,18 @@ mismatches are logged and replayed from the WAL. A crash between ClickHouse ackn
 WAL compaction can therefore produce a duplicate physical row, but the table's
 `ReplacingMergeTree`/`uniqExact(event_id)` design makes that replay safe.
 
+On `SIGINT`/`SIGTERM` the service stops accepting requests, finishes the ones in flight, and then
+flushes the remaining WAL backlog to ClickHouse before exiting. `SHUTDOWN_DRAIN_MS` bounds that
+flush and defaults to 25000; keep it below the orchestrator's kill deadline, which is why Compose
+sets `stop_grace_period: 30s`. Anything still pending when the budget expires stays in the WAL and
+replays on the next start.
+
+**Each instance needs its own `WAL_PATH` on its own durable storage.** The service takes an
+exclusive lock on the log at startup and exits rather than share it — two processes writing one WAL
+would interleave records and drop already-acknowledged events. Scaling out therefore means
+per-instance volumes (a Kubernetes StatefulSet with a `volumeClaimTemplate`, not a Deployment); see
+`docs/architecture.md` for the full topology notes.
+
 Recreate the disposable local table:
 
 ```sh
@@ -191,22 +200,33 @@ cargo run --release
 
 See `.env.example` for configuration defaults.
 
+### Ingest load test
+
+[`load_test.py`](load_test.py) is a standalone Python standard-library client for exercising the
+ingest gate. By default it sends 100 valid planar events over 30 seconds, mixing single-event
+requests, full 200-event requests, and a few smaller batches:
+
+```sh
+export INGEST_TOKEN='<the planar secret without the planar: prefix>'
+python3 load_test.py
+```
+
 ## Terminal dashboard
 
 The same binary includes a read-only ClickHouse dashboard for a configured tenant. It does not
 need `INGEST_KEYS`, so it can run inside the production network without an ingest secret:
 
 ```sh
-docker compose exec -it handler peak dashboard demo
+docker compose exec -it handler peak dashboard planar
 ```
 
 The Docker dashboard command uses the handler container's network and configuration, so it connects
-to ClickHouse at the internal Compose address. Start the stack first, then replace `demo` with any
+to ClickHouse at the internal Compose address. Start the stack first, then replace `planar` with any
 tenant name declared in `tenants/<name>.toml`:
 
 ```sh
 docker compose up -d --build clickhouse handler
-docker compose exec -it handler peak dashboard demo
+docker compose exec -it handler peak dashboard planar
 ```
 
 Press `q` or Escape to leave the dashboard. The dashboard process exits without stopping the
@@ -216,7 +236,7 @@ Or, when running locally, with `.env` loaded as above:
 
 ```sh
 set -a && . ./.env && set +a
-cargo run -- dashboard demo
+cargo run -- dashboard planar
 ```
 
 The dashboard uses `received_at` for its live incoming-events chart and `occurred_at` for the

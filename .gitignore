@@ -22,3 +22,6 @@ CLAUDE.md
 # Logs and local coverage output
 *.log
 coverage/
+
+# Pycache do not use
+__pycache__/

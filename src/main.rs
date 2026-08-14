@@ -1,4 +1,5 @@
 mod auth;
+mod batcher;
 mod cli;
 mod config;
 mod contract;
@@ -6,11 +7,9 @@ mod dashboard;
 mod error;
 mod event;
 mod manifest;
+mod wal;
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
@@ -31,16 +30,16 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{
     auth::ProducerRegistry,
+    batcher::BatchWriter,
     config::{Config, Limits},
     error::{ApiError, EventRejection},
-    event::{EventRow, IncomingEvent},
+    event::IncomingEvent,
 };
-
-const INSERT_TABLE: &str = "events";
 
 #[derive(Clone)]
 struct AppState {
     clickhouse: Client,
+    writer: Arc<BatchWriter>,
     producers: Arc<ProducerRegistry>,
     limits: Arc<Limits>,
     max_batch_events: usize,
@@ -94,8 +93,21 @@ async fn serve(registry: &'static manifest::Registry) {
             error!(%message, "invalid ingest-key registry");
             std::process::exit(2);
         });
+    let clickhouse = config.clickhouse.client();
+    let writer = BatchWriter::new(
+        clickhouse.clone(),
+        &config.wal_path,
+        config.max_insert_batch_events,
+        Duration::from_millis(config.batch_wait_ms),
+    )
+    .unwrap_or_else(|message| {
+        error!(%message, path = %config.wal_path.display(), "could not initialize telemetry WAL");
+        std::process::exit(2);
+    });
+    let writer_task = writer.start();
     let state = AppState {
-        clickhouse: config.clickhouse.client(),
+        clickhouse,
+        writer: Arc::clone(&writer),
         producers: Arc::new(producers),
         limits: Arc::new(config.limits),
         max_batch_events: config.max_batch_events,
@@ -109,11 +121,17 @@ async fn serve(registry: &'static manifest::Registry) {
             error!(%error, address = %config.bind_addr, "failed to bind listener");
             std::process::exit(2);
         });
-    info!(address = %config.bind_addr, database = %config.clickhouse.database, max_batch_events = config.max_batch_events, trust_cloudflare_headers = config.trust_cloudflare_headers, "telemetry ingest service listening");
+    info!(address = %config.bind_addr, database = %config.clickhouse.database, max_batch_events = config.max_batch_events, max_insert_batch_events = config.max_insert_batch_events, batch_wait_ms = config.batch_wait_ms, wal_path = %config.wal_path.display(), trust_cloudflare_headers = config.trust_cloudflare_headers, "telemetry ingest service listening");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server error");
+    // `serve` returns once in-flight requests have finished, so nothing can enqueue past this
+    // point and the WAL backlog is a fixed set. Flushing it here is what makes ephemeral storage
+    // survivable; without it the process exits owning up to a full batch plus a batch window.
+    writer
+        .drain(writer_task, Duration::from_millis(config.shutdown_drain_ms))
+        .await;
 }
 
 fn router(state: AppState, max_body_bytes: usize) -> Router {
@@ -146,7 +164,11 @@ async fn healthz(State(state): State<AppState>) -> Result<Json<Value>, ApiError>
     )
     .await;
     match result {
-        Ok(Ok(row)) if row.value == 1 => Ok(Json(serde_json::json!({ "ok": true }))),
+        Ok(Ok(row)) if row.value == 1 => Ok(Json(serde_json::json!({
+            "ok": true,
+            "pending_events": state.writer.pending_events(),
+            "batch_capacity": state.writer.batch_capacity(),
+        }))),
         Ok(Ok(_)) => {
             error!("unexpected ClickHouse health result");
             Err(ApiError::unavailable())
@@ -192,43 +214,20 @@ async fn ingest_events(
         }
     }
     let accepted = rows.len();
-    if !rows.is_empty() {
-        insert_rows(&state, &rows).await?;
-    }
     let mut event_names = rows
         .iter()
-        .map(|event| event.event_name.as_str())
+        .map(|event| event.event_name.clone())
         .collect::<Vec<_>>();
     event_names.sort_unstable();
     event_names.dedup();
-    info!(producer = producer.name, accepted, rejected = rejected.len(), event_names = ?event_names, country = %country, "processed telemetry batch");
-    Ok(Json(AcceptedResponse { accepted, rejected }))
-}
-
-async fn insert_rows(state: &AppState, rows: &[EventRow]) -> Result<(), ApiError> {
-    // wait_for_async_insert=1 means this only resolves after ClickHouse confirms the buffered
-    // async insert. Returning 200 before then would violate the durability contract.
-    let write_started = Instant::now();
-    let mut insert = state.clickhouse.insert(INSERT_TABLE).map_err(|error| {
-        error!(%error, "failed to create ClickHouse insert");
-        ApiError::unavailable()
-    })?;
-    for row in rows {
-        insert.write(row).await.map_err(|error| {
-            error!(%error, "failed to write ClickHouse insert row");
+    if !rows.is_empty() {
+        state.writer.enqueue(rows).await.map_err(|message| {
+            error!(%message, "could not durably append telemetry WAL");
             ApiError::unavailable()
         })?;
     }
-    insert.end().await.map_err(|error| {
-        error!(%error, "ClickHouse did not acknowledge async insert");
-        ApiError::unavailable()
-    })?;
-    debug!(
-        accepted = rows.len(),
-        clickhouse_write_ms = write_started.elapsed().as_millis(),
-        "ClickHouse accepted telemetry rows"
-    );
-    Ok(())
+    info!(producer = producer.name, accepted, rejected = rejected.len(), event_names = ?event_names, country = %country, "queued durable telemetry batch");
+    Ok(Json(AcceptedResponse { accepted, rejected }))
 }
 
 fn country_from_headers(headers: &HeaderMap, state: &AppState) -> String {
@@ -290,10 +289,25 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
+    /// Each state gets its own WAL: `Wal::open` takes an exclusive lock, and tests run in parallel
+    /// threads of one process.
+    fn test_wal_path() -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!("peak-main-test-{}-{seq}.wal", std::process::id()))
+    }
+
     fn state() -> AppState {
         let tenant_name = registry().first().unwrap().name.clone();
         AppState {
             clickhouse: Client::default(),
+            writer: BatchWriter::new(
+                Client::default(),
+                test_wal_path(),
+                200,
+                Duration::from_secs(5),
+            )
+            .unwrap(),
             producers: Arc::new(
                 ProducerRegistry::from_pairs(
                     &format!("{tenant_name}:this-is-a-test-key"),

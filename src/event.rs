@@ -40,7 +40,7 @@ pub struct IncomingResource {
     pub platform_version: Option<String>,
 }
 
-#[derive(Debug, Serialize, Row)]
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize, Row)]
 pub struct EventRow {
     #[serde(with = "clickhouse::serde::uuid")]
     pub event_id: Uuid,

@@ -30,14 +30,22 @@ services:
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
       INGEST_KEYS: ${INGEST_KEYS:?set INGEST_KEYS in .env}
       MANIFEST_DIR: /app/tenants
+      WAL_PATH: /var/lib/peak/events.wal
+      MAX_INSERT_BATCH_EVENTS: ${MAX_INSERT_BATCH_EVENTS:-200}
+      BATCH_WAIT_MS: ${BATCH_WAIT_MS:-5000}
+      SHUTDOWN_DRAIN_MS: ${SHUTDOWN_DRAIN_MS:-25000}
       DASHBOARD_TIMEZONE: ${DASHBOARD_TIMEZONE:-UTC}
       TRUST_CLOUDFLARE_HEADERS: ${TRUST_CLOUDFLARE_HEADERS:-false}
       RUST_LOG: info
     depends_on:
       - clickhouse
     networks: [internal, edge]
+    # Docker's default is 10s, which would SIGKILL the WAL drain part-way through. Keep this
+    # comfortably above SHUTDOWN_DRAIN_MS.
+    stop_grace_period: 30s
     volumes:
       - ./tenants:/app/tenants:ro
+      - handler-data:/var/lib/peak
 
   caddy:
     image: caddy:2.10-alpine
@@ -57,6 +65,7 @@ services:
 
 volumes:
   clickhouse-data:
+  handler-data:
   caddy-data:
   caddy-config:
 

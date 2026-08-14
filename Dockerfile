@@ -10,6 +10,7 @@ RUN touch src/main.rs && cargo build --release
 
 FROM alpine:3.22
 RUN addgroup -S telemetry && adduser -S telemetry -G telemetry
+RUN mkdir -p /var/lib/peak && chown telemetry:telemetry /var/lib/peak
 WORKDIR /app
 COPY config.json ./config.json
 COPY tenants ./tenants

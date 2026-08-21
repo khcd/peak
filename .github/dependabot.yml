@@ -1,8 +1,9 @@
 version: 2
 
 # One pull request a week covering everything: Rust crates, GitHub Actions, and both Dockerfiles.
-# Ordinary `groups` cannot span ecosystems, so the consolidation happens here instead -- each entry
-# below opts into this group rather than carrying its own schedule.
+# Ordinary `groups` cannot span ecosystems, so the consolidation happens here instead. Entries
+# below carry no schedule of their own -- the group owns it -- but each must declare `patterns`,
+# which selects the dependencies from that ecosystem that join the group. `*` means all of them.
 multi-ecosystem-groups:
   weekly:
     schedule:
@@ -11,18 +12,22 @@ multi-ecosystem-groups:
 updates:
   - package-ecosystem: cargo
     directory: /
+    patterns: ["*"]
     multi-ecosystem-group: weekly
 
   - package-ecosystem: github-actions
     directory: /
+    patterns: ["*"]
     multi-ecosystem-group: weekly
 
   # The handler image and the Caddy image are separate entries because each has its own Dockerfile;
   # sharing the group keeps them in the same pull request.
   - package-ecosystem: docker
     directory: /
+    patterns: ["*"]
     multi-ecosystem-group: weekly
 
   - package-ecosystem: docker
     directory: /deploy/caddy
+    patterns: ["*"]
     multi-ecosystem-group: weekly

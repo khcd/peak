@@ -125,13 +125,23 @@ The knobs you are most likely to touch:
 - `SHUTDOWN_DRAIN_MS` — how long to spend flushing the WAL on `SIGTERM` (default `25000`). Anything
   left over replays on the next start.
 
+## Schema
+
+[`deploy/clickhouse/init/01-schema.sql`](deploy/clickhouse/init/01-schema.sql) is the whole schema,
+applied automatically when the ClickHouse volume is first created. There is no migration tooling:
+change the file, recreate the volume. Telemetry is disposable enough that this is usually the right
+trade at this size — if it stops being true for you, put a real migration tool in front of it.
+
 Retention is 180 days, except `live_ping` heartbeats, which expire after 2 days.
 
-A fresh ClickHouse volume gets the full schema on first start. Existing deployments apply anything
-newer from [`deploy/clickhouse/migrations/`](deploy/clickhouse/migrations):
+If the dashboard's live chart gets slow at higher volume, this skip index helps and is safe to add
+to a running table:
 
 ```sh
-docker compose exec -T clickhouse clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --multiquery < deploy/clickhouse/migrations/004_live_ping_ttl.sql
+docker compose exec -T clickhouse clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --multiquery <<'SQL'
+ALTER TABLE telemetry.events ADD INDEX idx_received_at received_at TYPE minmax GRANULARITY 4;
+ALTER TABLE telemetry.events MATERIALIZE INDEX idx_received_at;
+SQL
 ```
 
 ## Running without Docker

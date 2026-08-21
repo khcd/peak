@@ -27,8 +27,7 @@ a dependency-free ingest-key generator (`keygen <tenant>`), dispatched in `src/m
 | `src/config.rs` | Env + `config.json` config; `ClickhouseConfig::client()` is the only client constructor |
 | `src/dashboard/query.rs` | **All read SQL.** Seven builders and two entry points, `fast` / `slow` |
 | `src/dashboard/{mod,app,ui}.rs` | TUI event loop, state, rendering, and handler backlog gauge |
-| `deploy/clickhouse/init/01-schema.sql` | Authoritative schema, auto-applied on first container init only |
-| `deploy/clickhouse/migrations/` | `002`–`004`, applied by hand. No migration tooling, no version table |
+| `deploy/clickhouse/init/01-schema.sql` | The entire schema, auto-applied on first container init only. No migrations, no version table: change the file and recreate the volume |
 | `tenants/*.toml` | Reviewed per-tenant manifests; `demo.toml` is the checked-in fixture and `_example.toml` is skipped |
 
 ## Conventions

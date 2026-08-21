@@ -1,4 +1,23 @@
 {$TELEMETRY_DOMAIN} {
-    encode zstd gzip
-    reverse_proxy handler:8081
+	encode zstd gzip
+
+	# Ingest is authenticated, but the rate limit applies before the handler sees the request, so
+	# an unauthenticated flood is bounded too. Deliberately generous: many installs behind one
+	# corporate NAT share a source address, and a client may send up to MAX_BATCH_EVENTS per
+	# request. Raise the window or key on something narrower if legitimate clients get 429s.
+	rate_limit {
+		zone ingest {
+			key {remote_host}
+			events 600
+			window 1m
+		}
+	}
+
+	# The handler enforces this too (MAX_BODY_BYTES). Rejecting oversized bodies at the edge keeps
+	# them off the internal network entirely.
+	request_body {
+		max_size 1MB
+	}
+
+	reverse_proxy handler:8081
 }

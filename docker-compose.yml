@@ -48,7 +48,10 @@ services:
       - handler-data:/var/lib/peak
 
   caddy:
-    image: caddy:2.10-alpine
+    # Built rather than pulled: the Caddyfile uses the rate-limit module, which is not in the
+    # official image. See deploy/caddy/Dockerfile.
+    build:
+      context: ./deploy/caddy
     restart: unless-stopped
     environment:
       TELEMETRY_DOMAIN: ${TELEMETRY_DOMAIN:?set TELEMETRY_DOMAIN in .env}

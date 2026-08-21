@@ -164,11 +164,9 @@ async fn healthz(State(state): State<AppState>) -> Result<Json<Value>, ApiError>
     )
     .await;
     match result {
-        Ok(Ok(row)) if row.value == 1 => Ok(Json(serde_json::json!({
-            "ok": true,
-            "pending_events": state.writer.pending_events(),
-            "batch_capacity": state.writer.batch_capacity(),
-        }))),
+        // Liveness only. The reverse proxy forwards every path, so this response is public:
+        // it must not disclose backlog depth or any other operational detail.
+        Ok(Ok(row)) if row.value == 1 => Ok(Json(serde_json::json!({ "ok": true }))),
         Ok(Ok(_)) => {
             error!("unexpected ClickHouse health result");
             Err(ApiError::unavailable())

@@ -30,7 +30,10 @@ struct HealthRow {
 #[derive(Debug, Deserialize)]
 struct IngestHealthResponse {
     ok: bool,
-    pending_events: usize,
+    /// Absent by design: `/healthz` is reachable through the public reverse proxy, so it reports
+    /// liveness only. The gauge renders its "unknown" state when the handler omits the counters.
+    #[serde(default)]
+    pending_events: Option<usize>,
     #[serde(default = "default_batch_capacity")]
     batch_capacity: usize,
 }

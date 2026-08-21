@@ -10,7 +10,8 @@ const TAIL_CAPACITY: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IngestHealth {
-    pub pending_events: usize,
+    /// `None` when the handler reports liveness without the backlog counters.
+    pub pending_events: Option<usize>,
     pub batch_capacity: usize,
 }
 
@@ -120,7 +121,7 @@ impl App {
     pub fn apply_ingest_health(&mut self, result: Result<IngestHealth, String>) {
         match result {
             Ok(health) => {
-                self.pending_events = Some(health.pending_events);
+                self.pending_events = health.pending_events;
                 self.pending_capacity = health.batch_capacity.max(1);
                 self.ingest_health_error = None;
             }
@@ -254,11 +255,19 @@ mod tests {
     fn ingest_health_updates_pending_gauge_and_unknown_state() {
         let mut app = App::default();
         app.apply_ingest_health(Ok(IngestHealth {
-            pending_events: 12,
+            pending_events: Some(12),
             batch_capacity: 200,
         }));
         assert_eq!(app.pending_events, Some(12));
         assert_eq!(app.pending_capacity, 200);
+        assert!(app.ingest_health_error.is_none());
+
+        // A handler that reports liveness only leaves the gauge unknown rather than erroring.
+        app.apply_ingest_health(Ok(IngestHealth {
+            pending_events: None,
+            batch_capacity: 200,
+        }));
+        assert_eq!(app.pending_events, None);
         assert!(app.ingest_health_error.is_none());
 
         app.apply_ingest_health(Err("handler unavailable".into()));

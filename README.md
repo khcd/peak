@@ -1,6 +1,6 @@
 # peak
 
-Authenticated, multi-tenant telemetry ingestion backed by ClickHouse, with a terminal dashboard.
+Simple multi-tenant telemetry & analytics ingestion service backed by ClickHouse, with a terminal dashboard.
 
 ![Terminal dashboard](assets/peak.png)
 
@@ -31,8 +31,22 @@ Open the dashboard:
 docker compose exec -it handler peak dashboard planar
 ```
 
-Add `caddy` (or drop the service names) to `docker compose up` to bring up the TLS reverse proxy on
-ports 80 and 443.
+That runs ingest on `127.0.0.1:8081` with no TLS, which is all you need locally. For a public
+deployment, see below.
+
+## Reverse proxy
+
+Dropping the service names — `docker compose up -d --build` — also starts Caddy on ports 80 and
+443. It gets a certificate for `TELEMETRY_DOMAIN` automatically and forwards to the handler.
+
+Caddy is built from [`deploy/caddy/Dockerfile`](deploy/caddy/Dockerfile) rather than pulled, because
+[`deploy/Caddyfile`](deploy/Caddyfile) uses the
+[rate-limit module](https://github.com/mholt/caddy-ratelimit), which the official image does not
+ship. That first build compiles Caddy from source and takes a few minutes; it is cached afterwards.
+
+The limit is 600 requests per minute per source IP, and request bodies are capped at 1MB at the
+edge. Installs behind one NAT share a source address, so raise the limit in the Caddyfile if real
+clients start seeing `429`.
 
 ## Sending events
 

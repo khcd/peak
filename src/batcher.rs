@@ -104,10 +104,6 @@ impl BatchWriter {
         self.pending_events.load(Ordering::Relaxed)
     }
 
-    pub fn batch_capacity(&self) -> usize {
-        self.max_events
-    }
-
     #[cfg(test)]
     pub async fn pending_rows(&self) -> Result<Vec<EventRow>, String> {
         let wal = Arc::clone(&self.wal);

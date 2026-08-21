@@ -2,10 +2,16 @@ name: CI
 
 on:
   push:
+  pull_request:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+# Least privilege for a public repository: no job here writes to the repo, and pull requests from
+# forks must not inherit a token that can.
+permissions:
+  contents: read
 
 jobs:
   rust:
@@ -36,3 +42,14 @@ jobs:
 
       - name: Check tenant manifest compatibility
         run: cargo test --locked manifest::tests::checked_in_manifests_pass_compatibility -- --exact
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check dependencies for known advisories
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

@@ -8,7 +8,7 @@ COPY src ./src
 # temporary dependency-cache binary created above.
 RUN touch src/main.rs && cargo build --release
 
-FROM alpine:3.22
+FROM alpine:3.24
 RUN addgroup -S telemetry && adduser -S telemetry -G telemetry
 RUN mkdir -p /var/lib/peak && chown telemetry:telemetry /var/lib/peak
 WORKDIR /app

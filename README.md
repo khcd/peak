@@ -1,14 +1,42 @@
 # peak
 
-Authenticated, versioned multi-tenant telemetry ingestion backed by ClickHouse.
+Authenticated, multi-tenant telemetry ingestion backed by ClickHouse, with a terminal dashboard.
 
-## Why 
+![Terminal dashboard](assets/peak.png)
 
-What are all my projects across web and local installs doing right now? From a terminal, without requiring Grafana, a browser, or any other heavyweight observability stack.  
+See what all your projects — web and local installs — are doing right now, from a terminal. No
+Grafana, no browser, no heavyweight observability stack.
 
-## Contract
+## Quick start
 
-`POST /v2/events` accepts a JSON array and a bearer token:
+```sh
+cp .env.example .env
+cargo run -- keygen planar
+```
+
+`keygen` prints a `planar:<secret>` pair. Put it in `.env` as `INGEST_KEYS`, and set
+`CLICKHOUSE_PASSWORD` and `TELEMETRY_DOMAIN` (`localhost` for a local run). All three need real
+values or Compose refuses to start.
+
+Start ClickHouse and the ingest handler:
+
+```sh
+docker compose up -d --build clickhouse handler
+curl http://127.0.0.1:8081/healthz
+```
+
+Open the dashboard:
+
+```sh
+docker compose exec -it handler peak dashboard planar
+```
+
+Add `caddy` (or drop the service names) to `docker compose up` to bring up the TLS reverse proxy on
+ports 80 and 443.
+
+## Sending events
+
+`POST /v2/events` takes a JSON array and a bearer token:
 
 ```json
 [
@@ -30,245 +58,83 @@ What are all my projects across web and local installs doing right now? From a t
 ]
 ```
 
-The producer is derived from `Authorization: Bearer <secret>`. The service accepts only reviewed `(producer, event_name, schema_version)` contracts and declared `attributes`. It returns `200` with `{ "accepted": N, "rejected": [...] }`; accepted events are fsynced to the server WAL before the response. ClickHouse insertion happens asynchronously, so an accepted event may take a few seconds to appear in the dashboard.
+The tenant comes from `Authorization: Bearer <secret>`. Only `(tenant, event_name, schema_version)`
+combinations declared in a manifest are accepted. The response is `200` with
+`{ "accepted": N, "rejected": [...] }`; accepted events are fsynced to a write-ahead log before the
+response returns and reach ClickHouse a few seconds later.
 
-`/v2/events` accepts uncompressed JSON plus `Content-Encoding: gzip` or `Content-Encoding: zstd`.
-Clients should compress batches before sending them; the service bounds both the encoded and
-decoded request body sizes.
+Bodies may be plain JSON, `Content-Encoding: gzip`, or `Content-Encoding: zstd`. Compress your
+batches.
+
+[`load_test.py`](load_test.py) is a dependency-free client for exercising the endpoint:
+
+```sh
+INGEST_TOKEN='<the secret>' python3 load_test.py
+```
 
 ## Tenants
 
-Tenant definitions are self-contained, reviewed TOML manifests in [`tenants`](tenants). The
-[`_example.toml`](tenants/_example.toml) file documents the available manifest shapes and is
-ignored by the loader. Add a tenant by copying it to `tenants/<name>.toml`, adding a
-`<name>:<secret>` entry to `INGEST_KEYS` (see [Generate an ingest key](#generate-an-ingest-key)),
-and restarting the service. `MANIFEST_DIR` defaults to `tenants`.
+Each tenant is one TOML manifest in [`tenants/`](tenants) declaring its events and their fields.
+[`_example.toml`](tenants/_example.toml) documents every option and is ignored by the loader.
 
-A manifest can define local reusable nested structs under `common_fields`. The type name is scoped to
-that manifest and can be used from an event field with `type = "<name>"`:
+To add a tenant: copy the example to `tenants/<name>.toml`, run `cargo run -- keygen <name>`, append
+the pair to `INGEST_KEYS` (comma-separated), and restart.
 
-```toml
-[events.model.common_fields]
-model = { type = "str", max_bytes = 256, required = true }
-load_ms = { type = "u64", required = true }
-size_mb = { type = "u64", required = true }
+## Dashboard
 
-[events.model_loaded.fields]
-model = { type = "model", required = true }
-```
+The dashboard is read-only and needs no ingest key, so it is safe to run inside the production
+network.
 
-Nested struct definitions may refer to other local structs, but cyclic nesting is rejected when the
-manifest is loaded.
+| Key | Action |
+| --- | --- |
+| `1` `2` `3` | switch time window |
+| `t` / `Shift+T` | next / previous tenant |
+| `p` | pause polling |
+| `r` | refresh |
+| `q` / `Esc` | exit |
 
-Optionally set `services = ["your-service"]` in a tenant manifest to restrict
-`resource.service_name`. The wire format and ClickHouse schema remain unchanged.
+Windows are whole calendar days in `DASHBOARD_TIMEZONE` (default `UTC`), so the same window means
+the same span wherever the dashboard runs. The live chart is a rolling 60 seconds. `CONNECTED`
+counts installs whose liveness ping arrived recently; tenants without a liveness event show `--`.
 
-## Generate an ingest key
+## Configuration
 
-`keygen` prints a ready-to-paste `INGEST_KEYS` entry — the tenant name, a colon, and a 64-character
-hex secret. It needs neither ClickHouse nor an existing ingest key, so it is the first thing you run
-on a fresh checkout:
+Secrets and deployment settings come from `.env` — see [`.env.example`](.env.example) for every
+variable and its default. Non-secret service settings live in [`config.json`](config.json).
 
-```sh
-cargo run -- keygen planar
-```
+The knobs you are most likely to touch:
 
-The `planar:<secret>` pair goes to stdout and the restart hint to stderr, so the pair can be
-redirected straight into a file. Restart the service after updating `INGEST_KEYS`.
+- `MAX_INSERT_BATCH_EVENTS` / `BATCH_WAIT_MS` — insert batch size and the flush timer for low-volume
+  tenants.
+- `WAL_PATH` — write-ahead log location (default `data/events.wal`). Each instance needs its own WAL
+  on its own durable storage; the service takes an exclusive lock and refuses to share one.
+- `SHUTDOWN_DRAIN_MS` — how long to spend flushing the WAL on `SIGTERM` (default `25000`). Anything
+  left over replays on the next start.
 
-Without a Rust toolchain, any 64 hex characters work — the format is chosen so that it clears the
-16-byte minimum and contains neither of the `,` and `:` characters `INGEST_KEYS` is split on:
+Retention is 180 days, except `live_ping` heartbeats, which expire after 2 days.
 
-```sh
-printf 'planar:%s\n' "$(openssl rand -hex 32)"
-```
-
-Once the stack is already running, a key for an *additional* tenant can be generated in the
-container. This cannot bootstrap the first key — Compose will not start any service, `exec`
-included, until `INGEST_KEYS` already has a value:
+A fresh ClickHouse volume gets the full schema on first start. Existing deployments apply anything
+newer from [`deploy/clickhouse/migrations/`](deploy/clickhouse/migrations):
 
 ```sh
-docker compose exec -it handler peak keygen another-tenant
+docker compose exec -T clickhouse clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --multiquery < deploy/clickhouse/migrations/004_live_ping_ttl.sql
 ```
 
-## Run locally
-
-Copy `.env.example` to `.env` and set `INGEST_KEYS` to a generated entry. Load it into the shell
-before every command below:
+## Running without Docker
 
 ```sh
 set -a && . ./.env && set +a
-```
-
-`CLICKHOUSE_USER` and `CLICKHOUSE_PASSWORD` must be set explicitly. `CLICKHOUSE_USER` falls back to
-`default`, but the ClickHouse image disables the `default` account as soon as `CLICKHOUSE_USER` is
-set on the container, so that fallback can never authenticate — it fails with `Code: 194`.
-
-## Run with Docker
-
-Docker Compose starts ClickHouse and the telemetry handler together. Copy the example environment
-file, generate a real ingest secret, set a ClickHouse password, and provide a domain for the
-optional Caddy reverse proxy:
-
-```sh
-cp .env.example .env
-cargo run -- keygen planar
-```
-
-Then edit `.env`. Compose interpolates the whole file before it starts anything, so all three of
-these must have real values or every `docker compose` command fails with
-`required variable ... is missing a value`:
-
-- `INGEST_KEYS` — the generated `planar:<secret>` pair, replacing `CHANGE_ME`.
-- `CLICKHOUSE_PASSWORD` — replacing `CHANGE_ME`.
-- `TELEMETRY_DOMAIN` — `localhost` for a local-only run, or the DNS name pointing at this host for
-  a public deployment.
-
-Start the complete stack, including Caddy on ports 80 and 443:
-
-```sh
-docker compose up -d --build
-```
-
-For local development, the handler is also exposed directly at
-`http://127.0.0.1:8081`; Caddy is not required for local clients. The `handler` service still
-needs `TELEMETRY_DOMAIN` in `.env` because Compose validates the full file, even when only these
-services are selected:
-
-```sh
-docker compose up -d --build clickhouse handler
-curl http://127.0.0.1:8081/healthz
-```
-
-Follow service logs or stop the stack with:
-
-```sh
-docker compose logs -f handler
-docker compose down
-```
-
-ClickHouse data is kept in the `clickhouse-data` Docker volume, and pending accepted telemetry is
-kept in the `handler-data` volume until ClickHouse acknowledges it. The initial schema is applied
-only when the ClickHouse volume is first created.
-
-## Service settings
-
-Non-secret, versioned settings live in [`config.json`](config.json). This file is tracked by design:
-it contains service settings only and must never hold credentials. `CONFIG_PATH` can point to a
-different file; it defaults to `config.json`. The supplied Docker image includes this file at
-`/app/config.json`.
-
-`clickhouse.transport_compression` controls the ClickHouse client connection: `lz4` uses native LZ4
-transport blocks (the default), while `none` disables them. This affects only traffic between the
-service and ClickHouse; MergeTree storage compression is configured independently by ClickHouse.
-
-The ingest path appends accepted rows to a JSON-lines WAL before returning `200`, then combines
-requests into ClickHouse inserts. `MAX_INSERT_BATCH_EVENTS` controls the size of those inserts;
-`BATCH_WAIT_MS` defaults to 5000, so low-volume producers are flushed after five seconds even when
-they never fill a batch. Smaller values reduce latency but increase ClickHouse insert frequency.
-`WAL_PATH` defaults to `data/events.wal`; the Compose deployment uses the durable `handler-data`
-volume. On startup, pending WAL rows are checked against ClickHouse by full row content. Matching
-rows are acknowledged without another insert, missing rows are replayed, and event-ID content
-mismatches are logged and replayed from the WAL. A crash between ClickHouse acknowledgement and
-WAL compaction can therefore produce a duplicate physical row, but the table's
-`ReplacingMergeTree`/`uniqExact(event_id)` design makes that replay safe.
-
-On `SIGINT`/`SIGTERM` the service stops accepting requests, finishes the ones in flight, and then
-flushes the remaining WAL backlog to ClickHouse before exiting. `SHUTDOWN_DRAIN_MS` bounds that
-flush and defaults to 25000; keep it below the orchestrator's kill deadline, which is why Compose
-sets `stop_grace_period: 30s`. Anything still pending when the budget expires stays in the WAL and
-replays on the next start.
-
-**Each instance needs its own `WAL_PATH` on its own durable storage.** The service takes an
-exclusive lock on the log at startup and exits rather than share it — two processes writing one WAL
-would interleave records and drop already-acknowledged events. Scaling out therefore means
-per-instance volumes (a Kubernetes StatefulSet with a `volumeClaimTemplate`, not a Deployment); see
-`docs/architecture.md` for the full topology notes.
-
-Recreate the disposable local table:
-
-```sh
-docker compose exec -T clickhouse clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --multiquery \
-  < deploy/clickhouse/migrations/002_rebuild_for_v2.sql
-```
-
-Start the service:
-
-```sh
 cargo run --release
 ```
 
-See `.env.example` for configuration defaults.
+`CLICKHOUSE_USER` and `CLICKHOUSE_PASSWORD` must both be set explicitly — the ClickHouse image
+disables the `default` account once `CLICKHOUSE_USER` is present, so relying on the fallback fails
+with `Code: 194`.
 
-### Ingest load test
+## More
 
-[`load_test.py`](load_test.py) is a standalone Python standard-library client for exercising the
-ingest gate. By default it sends 100 valid planar events over 30 seconds, mixing single-event
-requests, full 200-event requests, and a few smaller batches:
-
-```sh
-export INGEST_TOKEN='<the planar secret without the planar: prefix>'
-python3 load_test.py
-```
-
-## Terminal dashboard
-
-The same binary includes a read-only ClickHouse dashboard for a configured tenant. It does not
-need `INGEST_KEYS`, so it can run inside the production network without an ingest secret:
-
-```sh
-docker compose exec -it handler peak dashboard planar
-```
-
-The Docker dashboard command uses the handler container's network and configuration, so it connects
-to ClickHouse at the internal Compose address. Start the stack first, then replace `planar` with any
-tenant name declared in `tenants/<name>.toml`:
-
-```sh
-docker compose up -d --build clickhouse handler
-docker compose exec -it handler peak dashboard planar
-```
-
-Press `q` or Escape to leave the dashboard. The dashboard process exits without stopping the
-background handler or ClickHouse containers.
-
-Or, when running locally, with `.env` loaded as above:
-
-```sh
-set -a && . ./.env && set +a
-cargo run -- dashboard planar
-```
-
-The dashboard uses `received_at` for its live incoming-events chart and `occurred_at` for the
-historical totals and breakdowns.
-
-Every historical window is a whole number of calendar days ending with today — `7d` starts at
-midnight six days ago, not 168 hours ago — so the totals and the per-window breakdowns always
-cover exactly the same span. Those day boundaries resolve in `DASHBOARD_TIMEZONE` (default `UTC`),
-which is a property of the project rather than of the viewer: the same window means the same span
-whether the dashboard runs on a laptop in Sydney or via `docker compose exec` in the handler
-container. The active timezone is shown in the header. The live chart is unaffected — it is a
-rolling 60 seconds of wall time.
-
-Press `1`, `2`, or `3` for the manifest's three configured windows; `t` switches to the next
-tenant and `Shift+T` to the previous one. `p` pauses polling, `r` refreshes, and `q` (or Escape)
-exits. If ClickHouse is temporarily unavailable, the
-last successful snapshot stays on screen and polling resumes automatically when it recovers.
-
-The `CONNECTED` panel follows each manifest's optional liveness event. Its offline threshold is
-twice the declared ping interval plus one minute; tenants without liveness show `--`.
-Liveness is measured on `received_at`, so an install whose wall clock is wrong is still counted
-correctly. A sleeping or suspended device stops pinging and drops out of the count, as intended.
-
-## Retention
-
-`live_ping` rows expire after 2 days; every other event keeps the standard 180 days. A heartbeat
-from every online install every five minutes outgrows all other event types combined, and is
-worthless once the connected-clients window has passed. Existing deployments pick this up via
-`deploy/clickhouse/migrations/004_live_ping_ttl.sql`; fresh ones get it from the init schema.
-
-`deploy/clickhouse/migrations/003_received_at_skip_index.sql` is an optional performance migration
-for the live chart; it is not applied by the normal setup.
+[`docs/architecture.md`](docs/architecture.md) covers the read and write paths, WAL recovery,
+deployment topology, and scaling out.
 
 ## Security
 

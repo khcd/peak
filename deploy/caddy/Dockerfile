@@ -4,5 +4,5 @@
 FROM caddy:2.10-builder-alpine AS build
 RUN xcaddy build --with github.com/mholt/caddy-ratelimit
 
-FROM caddy:2.10-alpine
+FROM caddy:2.11-alpine
 COPY --from=build /usr/bin/caddy /usr/bin/caddy

@@ -1,24 +1,28 @@
 version: 2
+
+# One pull request a week covering everything: Rust crates, GitHub Actions, and both Dockerfiles.
+# Ordinary `groups` cannot span ecosystems, so the consolidation happens here instead -- each entry
+# below opts into this group rather than carrying its own schedule.
+multi-ecosystem-groups:
+  weekly:
+    schedule:
+      interval: weekly
+
 updates:
   - package-ecosystem: cargo
     directory: /
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    groups:
-      # One PR for routine patch churn; majors and minors still arrive separately so they get read.
-      patch:
-        update-types:
-          - patch
+    multi-ecosystem-group: weekly
 
   - package-ecosystem: github-actions
     directory: /
-    schedule:
-      interval: weekly
+    multi-ecosystem-group: weekly
+
+  # The handler image and the Caddy image are separate entries because each has its own Dockerfile;
+  # sharing the group keeps them in the same pull request.
+  - package-ecosystem: docker
+    directory: /
+    multi-ecosystem-group: weekly
 
   - package-ecosystem: docker
-    directories:
-      - /
-      - /deploy/caddy
-    schedule:
-      interval: weekly
+    directory: /deploy/caddy
+    multi-ecosystem-group: weekly

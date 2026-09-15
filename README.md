@@ -26,8 +26,73 @@ let app = axum::Router::new()
     .nest("/telemetry", peak::server::router(state, 1_048_576));
 ```
 
+For the embedded approach, your application creates the registry, authentication registry, and
+durable writer, then starts its own listener:
+
+```rust,no_run
+use std::{path::Path, sync::Arc, time::Duration};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let registry = Arc::new(
+        peak::Registry::load(Path::new("tenants")).map_err(std::io::Error::other)?,
+    );
+    let producers = Arc::new(peak::ProducerRegistry::from_pairs(
+        &std::env::var("INGEST_KEYS")?,
+        Arc::clone(&registry),
+    ).map_err(std::io::Error::other)?);
+    let clickhouse = peak::config::ClickhouseConfig::new(
+        "http://127.0.0.1:8123",
+        "telemetry",
+        "telemetry",
+        Some(std::env::var("CLICKHOUSE_PASSWORD")?),
+        peak::config::TransportCompression::Lz4,
+    )
+    .client();
+    let writer = peak::batcher::BatchWriter::new(
+        clickhouse.clone(), "data/events.wal", 200, Duration::from_secs(5),
+    ).map_err(std::io::Error::other)?;
+    let writer_task = writer.start();
+    let state = peak::AppState::new(
+        clickhouse,
+        writer.clone(),
+        producers,
+        peak::Limits {
+            max_attributes_bytes: 16_384,
+            max_event_age_days: 190,
+            max_future_skew_seconds: 300,
+        },
+        200,
+        false,
+        env!("CARGO_PKG_VERSION"),
+    );
+    let app = axum::Router::new()
+        .nest("/telemetry", peak::server::router(state, 1_048_576));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
+    axum::serve(listener, app).await?;
+    writer.drain(writer_task, Duration::from_secs(25)).await;
+    Ok(())
+}
+```
+
+If you want Peak to own the listener and lifecycle instead, use the standalone server entrypoint:
+
+```rust,no_run
+use std::{path::Path, sync::Arc};
+
+#[tokio::main]
+async fn main() -> Result<(), String> {
+    let registry = Arc::new(peak::Registry::load(Path::new("tenants"))?);
+    peak::server::serve(registry).await
+}
+```
+
 `AppState::new` accepts a ClickHouse client, durable `BatchWriter`, `ProducerRegistry`, and the
-validation settings. Keep the WAL on durable storage and terminate TLS at a trusted reverse proxy.
+validation settings. Importing Peak does not start a process or bind a port; the host application
+must start its Axum listener and Tokio runtime. The host must also start the `BatchWriter` before
+serving requests. For a standalone process, use `peak::server::serve(registry)` instead; it owns
+configuration, the writer, listener, and graceful shutdown. Keep the WAL on durable storage and
+terminate TLS at a trusted reverse proxy.
 
 ## Quick start
 

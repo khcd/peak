@@ -7,6 +7,28 @@ Simple multi-tenant telemetry & analytics ingestion service backed by ClickHouse
 See what all your projects — web and local installs — are doing right now, from a terminal. No
 Grafana, no browser, no heavyweight observability stack.
 
+## Use as a library
+
+Peak can be embedded in another Axum application. During API stabilization, use the Git
+dependency rather than crates.io:
+
+```toml
+[dependencies]
+peak = { git = "ssh://git@github.com/khcd/peak", tag = "v0.1.0", default-features = false, features = ["server"] }
+```
+
+The `server` feature provides the authenticated ingest router without the terminal dashboard. The
+default feature set (`server`, `cli`) builds the standalone `peak` binary. Mount the router under
+your application's path:
+
+```rust,no_run
+let app = axum::Router::new()
+    .nest("/telemetry", peak::server::router(state, 1_048_576));
+```
+
+`AppState::new` accepts a ClickHouse client, durable `BatchWriter`, `ProducerRegistry`, and the
+validation settings. Keep the WAL on durable storage and terminate TLS at a trusted reverse proxy.
+
 ## Quick start
 
 ```sh
@@ -85,6 +107,18 @@ batches.
 ```sh
 INGEST_TOKEN='<the secret>' python3 load_test.py
 ```
+
+For a quick local end-to-end check, start the `clickhouse` and `handler` Compose services, then
+run the small deterministic fixture. It exercises gzip decoding, authentication, WAL enqueueing,
+async persistence, and verifies the resulting rows through ClickHouse:
+
+```sh
+set -a && . ./.env && set +a
+INGEST_TOKEN="${INGEST_KEYS#planar:}" python3 load_test.py --e2e
+```
+
+The E2E command uses only Python's standard library and the `clickhouse-client` already present in
+the ClickHouse container; it requires no additional test framework.
 
 ## Tenants
 

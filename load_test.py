@@ -20,6 +20,7 @@ import json
 import os
 import platform
 import random
+import subprocess
 import sys
 import time
 import uuid
@@ -87,6 +88,11 @@ def parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="print the request plan without contacting the ingest service",
+    )
+    parser.add_argument(
+        "--e2e",
+        action="store_true",
+        help="send a small deterministic batch and verify it in ClickHouse",
     )
     args = parser.parse_args()
     if args.total <= 0:
@@ -243,6 +249,9 @@ def print_plan(sizes: list[int], duration: float, max_batch: int) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.e2e:
+        return run_e2e(args)
+
     token = args.token or os.environ.get("INGEST_TOKEN", "")
     sizes = planned_batch_sizes(args.total, args.max_batch)
     print_plan(sizes, args.duration, args.max_batch)
@@ -310,6 +319,111 @@ def run(args: argparse.Namespace) -> int:
         f"{(latency_total / max(request_count - failures, 1)) * 1000:.1f}ms"
     )
     return 0 if sent == args.total and accepted == args.total and failures == 0 else 1
+
+
+def clickhouse_e2e_query(query: str) -> str:
+    """Run a read-only ClickHouse query through the local Compose service."""
+    command = [
+        "docker",
+        "compose",
+        "exec",
+        "-T",
+        "clickhouse",
+        "clickhouse-client",
+        "--user",
+        os.environ.get("CLICKHOUSE_USER", "telemetry"),
+        "--password",
+        os.environ.get("CLICKHOUSE_PASSWORD", ""),
+        "--format",
+        "TSVRaw",
+        "--query",
+        query,
+    ]
+    try:
+        result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise LoadTestError(f"ClickHouse verification command failed: {error}") from error
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()[:500]
+        raise LoadTestError(f"ClickHouse verification failed: {detail}")
+    return result.stdout.strip()
+
+
+def run_e2e(args: argparse.Namespace) -> int:
+    """Exercise ingest, durable batching, and ClickHouse persistence with a tiny fixture."""
+    token = args.token or os.environ.get("INGEST_TOKEN", "")
+    marker = f"e2e-{uuid.uuid4().hex}"
+    install_id = str(uuid.uuid4())
+    events = [
+        {
+            "event_id": str(uuid.uuid4()),
+            "event_name": "session_start",
+            "schema_version": 1,
+            "occurred_at": utc_timestamp(),
+            "subject": {"kind": "install", "id": install_id},
+            "session_id": str(uuid.uuid4()),
+            "resource": {
+                "service_name": "planar-e2e",
+                "service_version": marker,
+                "platform": "python",
+                "platform_version": platform.python_version(),
+            },
+            "attributes": {},
+        },
+        {
+            "event_id": str(uuid.uuid4()),
+            "event_name": "feature_used",
+            "schema_version": 1,
+            "occurred_at": utc_timestamp(),
+            "subject": {"kind": "install", "id": install_id},
+            "session_id": str(uuid.uuid4()),
+            "resource": {
+                "service_name": "planar-e2e",
+                "service_version": marker,
+                "platform": "python",
+                "platform_version": platform.python_version(),
+            },
+            "attributes": {"feature": "e2e"},
+        },
+        {
+            "event_id": str(uuid.uuid4()),
+            "event_name": "live_ping",
+            "schema_version": 1,
+            "occurred_at": utc_timestamp(),
+            "subject": {"kind": "install", "id": install_id},
+            "session_id": str(uuid.uuid4()),
+            "resource": {
+                "service_name": "planar-e2e",
+                "service_version": marker,
+                "platform": "python",
+                "platform_version": platform.python_version(),
+            },
+            "attributes": {},
+        },
+    ]
+    try:
+        accepted, latency = send_batch(args.url, token, events, args.timeout, use_gzip=True)
+        print(f"e2e ingest: accepted={accepted}, events={len(events)}, latency={latency * 1000:.1f}ms")
+        query = (
+            "SELECT event_name, count() FROM telemetry.events "
+            f"WHERE producer = 'planar' AND service_version = '{marker}' "
+            "GROUP BY event_name ORDER BY event_name FORMAT TSV"
+        )
+        deadline = time.monotonic() + 20
+        rows = ""
+        while time.monotonic() < deadline:
+            rows = clickhouse_e2e_query(query)
+            if rows:
+                break
+            time.sleep(1)
+        expected = "feature_used\t1\nlive_ping\t1\nsession_start\t1"
+        if rows != expected:
+            raise LoadTestError(f"unexpected ClickHouse rows for {marker}: {rows!r}; expected {expected!r}")
+        print(f"e2e database: {rows.replace(chr(10), ', ')}")
+    except LoadTestError as error:
+        print(f"e2e failed: {error}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

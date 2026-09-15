@@ -2,11 +2,11 @@ FROM rust:1.98-alpine AS build
 RUN apk add --no-cache musl-dev
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
-RUN mkdir src && printf 'fn main() {}\n' > src/main.rs && cargo build --release && rm -rf src target/release/peak
+RUN mkdir src && printf 'fn main() {}\n' > src/main.rs && printf '' > src/lib.rs && cargo build --release && rm -rf src target/release/peak
 COPY src ./src
 # Docker preserves source mtimes on COPY. Refresh the crate root so Cargo cannot reuse the
 # temporary dependency-cache binary created above.
-RUN touch src/main.rs && cargo build --release
+RUN touch src/main.rs src/lib.rs && cargo build --release
 
 FROM alpine:3.24
 RUN addgroup -S telemetry && adduser -S telemetry -G telemetry

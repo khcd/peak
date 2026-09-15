@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use axum::http::{HeaderMap, header};
 use sha2::{Digest, Sha256};
@@ -10,11 +11,13 @@ use crate::{
 
 #[derive(Clone)]
 pub struct ProducerRegistry {
-    by_digest: HashMap<[u8; 32], &'static Tenant>,
+    registry: Arc<Registry>,
+    by_digest: HashMap<[u8; 32], String>,
 }
 
 impl ProducerRegistry {
-    pub fn from_pairs(value: &str, registry: &'static Registry) -> Result<Self, String> {
+    /// Creates an authentication registry from comma-separated `tenant:secret` pairs.
+    pub fn from_pairs(value: &str, registry: Arc<Registry>) -> Result<Self, String> {
         let mut by_digest = HashMap::new();
         let mut names = HashSet::new();
         let mut found = false;
@@ -34,20 +37,23 @@ impl ProducerRegistry {
                     "secret for producer '{name}' must be at least 16 bytes"
                 ));
             }
-            let producer = registry
+            registry
                 .get(name)
                 .ok_or_else(|| format!("unknown producer '{name}'"))?;
             let digest: [u8; 32] = Sha256::digest(secret.as_bytes()).into();
-            if by_digest.insert(digest, producer).is_some() {
+            if by_digest.insert(digest, name.to_owned()).is_some() {
                 return Err("duplicate ingest secret".into());
             }
         }
         found
-            .then_some(Self { by_digest })
+            .then_some(Self {
+                registry,
+                by_digest,
+            })
             .ok_or_else(|| "INGEST_KEYS must not be empty".into())
     }
 
-    pub fn authenticate(&self, headers: &HeaderMap) -> Result<&'static Tenant, ApiError> {
+    pub fn authenticate(&self, headers: &HeaderMap) -> Result<&Tenant, ApiError> {
         let Some(value) = headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
@@ -60,7 +66,7 @@ impl ProducerRegistry {
         let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
         self.by_digest
             .get(&digest)
-            .copied()
+            .and_then(|name| self.registry.get(name))
             .ok_or_else(ApiError::unauthorized)
     }
 }
@@ -75,7 +81,12 @@ pub(crate) fn valid_producer_name(value: &str) -> bool {
 
 /// Mints a secret that satisfies `from_pairs` by construction: hex is well over the 16-byte
 /// minimum, and it contains neither of the `,` and `:` delimiters the parser splits on.
-pub(crate) fn generate_secret() -> String {
+/// Generates a parser-safe, cryptographically random ingest secret.
+///
+/// # Panics
+///
+/// Panics if the operating system random number generator is unavailable.
+pub fn generate_secret() -> String {
     use std::fmt::Write;
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).expect("operating system random number generator unavailable");
@@ -92,7 +103,7 @@ mod tests {
     use super::{ProducerRegistry, generate_secret, valid_producer_name};
     use crate::manifest::Registry;
     use axum::http::{HeaderMap, HeaderValue, header::AUTHORIZATION};
-    use std::path::Path;
+    use std::{path::Path, sync::Arc};
     #[test]
     fn validates_producer_names() {
         assert!(valid_producer_name("producer"));
@@ -112,7 +123,9 @@ mod tests {
 
     #[test]
     fn generated_secret_authenticates_for_the_right_tenant() {
-        let registry = Box::leak(Box::new(Registry::load(Path::new("tenants")).unwrap()));
+        let registry = Arc::new(
+            Registry::load(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tenants"))).unwrap(),
+        );
         let tenant_name = registry.first().unwrap().name.clone();
         let secret = generate_secret();
         let producers =

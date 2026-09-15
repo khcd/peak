@@ -36,7 +36,34 @@ pub struct ClickhouseConfig {
     transport_compression: TransportCompression,
 }
 
+/// Compression used for the ClickHouse native transport.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportCompression {
+    /// Use LZ4 compression.
+    Lz4,
+    /// Disable transport compression.
+    None,
+}
+
 impl ClickhouseConfig {
+    /// Creates ClickHouse connection settings without reading process environment variables.
+    pub fn new(
+        url: impl Into<String>,
+        database: impl Into<String>,
+        user: impl Into<String>,
+        password: Option<String>,
+        compression: TransportCompression,
+    ) -> Self {
+        Self {
+            url: url.into(),
+            database: database.into(),
+            user: user.into(),
+            password,
+            transport_compression: compression,
+        }
+    }
+
     pub fn from_env() -> Result<Self, String> {
         let file_config = FileConfig::from_path(Path::new(&config_path()))?;
         Ok(Self {
@@ -105,12 +132,13 @@ pub fn manifest_dir() -> String {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct FileConfig {
+pub struct FileConfig {
     clickhouse: ClickhouseFileConfig,
 }
 
 impl FileConfig {
-    fn from_path(path: &Path) -> Result<Self, String> {
+    /// Loads non-secret ClickHouse settings from a JSON file.
+    pub fn from_path(path: &Path) -> Result<Self, String> {
         let contents = fs::read_to_string(path)
             .map_err(|error| format!("could not read {}: {error}", path.display()))?;
         serde_json::from_str(&contents)
@@ -122,13 +150,6 @@ impl FileConfig {
 #[serde(deny_unknown_fields)]
 struct ClickhouseFileConfig {
     transport_compression: TransportCompression,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum TransportCompression {
-    Lz4,
-    None,
 }
 
 fn config_path() -> String {

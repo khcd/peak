@@ -64,7 +64,7 @@ pub struct EventRow {
 impl IncomingEvent {
     pub fn validate(
         self,
-        producer: &'static Tenant,
+        producer: &Tenant,
         limits: &Limits,
         country: &str,
         ingest_version: &str,

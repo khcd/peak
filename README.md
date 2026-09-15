@@ -7,6 +7,93 @@ Simple multi-tenant telemetry & analytics ingestion service backed by ClickHouse
 See what all your projects — web and local installs — are doing right now, from a terminal. No
 Grafana, no browser, no heavyweight observability stack.
 
+## Use as a library
+
+Peak can be embedded in another Axum application. During API stabilization, use the Git
+dependency rather than crates.io:
+
+```toml
+[dependencies]
+peak = { git = "ssh://git@github.com/khcd/peak", tag = "v0.1.0", default-features = false, features = ["server"] }
+```
+
+The `server` feature provides the authenticated ingest router without the terminal dashboard. The
+default feature set (`server`, `cli`) builds the standalone `peak` binary. Mount the router under
+your application's path:
+
+```rust,no_run
+let app = axum::Router::new()
+    .nest("/telemetry", peak::server::router(state, 1_048_576));
+```
+
+For the embedded approach, your application creates the registry, authentication registry, and
+durable writer, then starts its own listener:
+
+```rust,no_run
+use std::{path::Path, sync::Arc, time::Duration};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let registry = Arc::new(
+        peak::Registry::load(Path::new("tenants")).map_err(std::io::Error::other)?,
+    );
+    let producers = Arc::new(peak::ProducerRegistry::from_pairs(
+        &std::env::var("INGEST_KEYS")?,
+        Arc::clone(&registry),
+    ).map_err(std::io::Error::other)?);
+    let clickhouse = peak::config::ClickhouseConfig::new(
+        "http://127.0.0.1:8123",
+        "telemetry",
+        "telemetry",
+        Some(std::env::var("CLICKHOUSE_PASSWORD")?),
+        peak::config::TransportCompression::Lz4,
+    )
+    .client();
+    let writer = peak::batcher::BatchWriter::new(
+        clickhouse.clone(), "data/events.wal", 200, Duration::from_secs(5),
+    ).map_err(std::io::Error::other)?;
+    let writer_task = writer.start();
+    let state = peak::AppState::new(
+        clickhouse,
+        writer.clone(),
+        producers,
+        peak::Limits {
+            max_attributes_bytes: 16_384,
+            max_event_age_days: 190,
+            max_future_skew_seconds: 300,
+        },
+        200,
+        false,
+        env!("CARGO_PKG_VERSION"),
+    );
+    let app = axum::Router::new()
+        .nest("/telemetry", peak::server::router(state, 1_048_576));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
+    axum::serve(listener, app).await?;
+    writer.drain(writer_task, Duration::from_secs(25)).await;
+    Ok(())
+}
+```
+
+If you want Peak to own the listener and lifecycle instead, use the standalone server entrypoint:
+
+```rust,no_run
+use std::{path::Path, sync::Arc};
+
+#[tokio::main]
+async fn main() -> Result<(), String> {
+    let registry = Arc::new(peak::Registry::load(Path::new("tenants"))?);
+    peak::server::serve(registry).await
+}
+```
+
+`AppState::new` accepts a ClickHouse client, durable `BatchWriter`, `ProducerRegistry`, and the
+validation settings. Importing Peak does not start a process or bind a port; the host application
+must start its Axum listener and Tokio runtime. The host must also start the `BatchWriter` before
+serving requests. For a standalone process, use `peak::server::serve(registry)` instead; it owns
+configuration, the writer, listener, and graceful shutdown. Keep the WAL on durable storage and
+terminate TLS at a trusted reverse proxy.
+
 ## Quick start
 
 ```sh
@@ -85,6 +172,18 @@ batches.
 ```sh
 INGEST_TOKEN='<the secret>' python3 load_test.py
 ```
+
+For a quick local end-to-end check, start the `clickhouse` and `handler` Compose services, then
+run the small deterministic fixture. It exercises gzip decoding, authentication, WAL enqueueing,
+async persistence, and verifies the resulting rows through ClickHouse:
+
+```sh
+set -a && . ./.env && set +a
+INGEST_TOKEN="${INGEST_KEYS#planar:}" python3 load_test.py --e2e
+```
+
+The E2E command uses only Python's standard library and the `clickhouse-client` already present in
+the ClickHouse container; it requires no additional test framework.
 
 ## Tenants
 

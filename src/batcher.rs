@@ -223,7 +223,7 @@ impl BatchWriter {
 /// The normal path sends one insert per size/time batch. `wait_for_async_insert=1` remains set on
 /// the client, so a successful call means ClickHouse has accepted all rows in that batch.
 pub async fn insert_rows(client: &Client, rows: &[EventRow]) -> clickhouse::error::Result<()> {
-    let mut insert = client.insert(INSERT_TABLE)?;
+    let mut insert = client.insert::<EventRow>(INSERT_TABLE).await?;
     for row in rows {
         insert.write(row).await?;
     }

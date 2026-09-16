@@ -4,7 +4,7 @@ Simple multi-tenant telemetry & analytics ingestion service backed by ClickHouse
 
 ![Terminal dashboard](assets/peak.png)
 
-See what all your projects — web and local installs — are doing right now, from a terminal. No
+See what all your projects are doing right now from a terminal. No
 Grafana, no browser, no heavyweight observability stack.
 
 ## Use as a library
